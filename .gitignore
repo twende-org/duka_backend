@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Secrets and local configuration. .env.example is the tracked template.
+.env
+.env.*
+!.env.example
+*key.json
+*service-account*.json
+*.pem
+
+# Django runtime artifacts
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+celerybeat-schedule*
+celerybeat.pid
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Editors and OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.swp
+*.log

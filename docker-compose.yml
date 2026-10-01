@@ -1,0 +1,114 @@
+name: duka-backend
+
+# Local development stack: PostgreSQL 16 + Redis 7 + the API.
+#
+#   cp .env.example .env        # optional — the defaults below also work
+#   docker compose up -d --build
+#   curl -s http://127.0.0.1:8009/healthz/
+#
+# The API is published on 127.0.0.1 only, and Postgres/Redis are NOT published at
+# all: host ports 5432 and 6379 usually belong to another project on a shared
+# machine. Reach them with `docker compose exec db psql -U duka_backend`.
+#
+# Celery is opt-in so a plain `up -d` stays light:
+#   docker compose --profile async up -d
+#
+# Production runs from docker-compose.prod.yml instead (Traefik, no host ports).
+
+x-backend: &backend
+  build: .
+  image: duka_backend:local
+  env_file:
+    # Everything not listed in `environment` below (API keys, Facebook/AI/Delivery
+    # App settings). `required: false` so the stack runs on a fresh clone.
+    - path: .env
+      required: false
+  environment: &backend-env
+    # Network-scoped values the container needs regardless of .env contents.
+    POSTGRES_HOST: db
+    POSTGRES_PORT: "5432"
+    POSTGRES_DB: ${POSTGRES_DB:-duka_backend}
+    POSTGRES_USER: ${POSTGRES_USER:-duka_backend}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-duka_backend}
+    CELERY_BROKER_URL: redis://redis:6379/0
+    REDIS_CACHE_URL: redis://redis:6379/1
+    DJANGO_DEBUG: ${DJANGO_DEBUG:-True}
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-development-only-not-a-real-secret}
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-duka_backend}
+      POSTGRES_USER: ${POSTGRES_USER:-duka_backend}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-duka_backend}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-duka_backend} -d ${POSTGRES_DB:-duka_backend}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      # This container owns migrate + collectstatic; worker/beat set it to 0 so
+      # they never race the schema.
+      RUN_MIGRATIONS: "1"
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8009}:8000"
+    volumes:
+      - media:/app/media
+      - staticfiles:/app/staticfiles
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  worker:
+    <<: *backend
+    profiles: ["async"]
+    command: celery -A config worker -l info
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+    volumes:
+      - media:/app/media
+
+  beat:
+    <<: *backend
+    profiles: ["async"]
+    command: celery -A config beat -l info
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+    # No volume: the schedule file lives in /tmp/celerybeat-schedule and is
+    # rebuilt from CELERY_BEAT_SCHEDULE on start (see README).
+
+volumes:
+  db_data:
+  redis_data:
+  media:
+  staticfiles:

@@ -1,0 +1,43 @@
+# Version control and CI
+.git/
+.gitignore
+.github/
+
+# Local Python state
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.tox/
+
+# Secrets and local configuration — never bake these into an image layer.
+# .env.example stays in the context as a reference template.
+.env
+.env.*
+!.env.example
+*key.json
+*service-account*.json
+*.pem
+
+# Runtime artifacts
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+celerybeat-schedule*
+celerybeat.pid
+.coverage
+.coverage.*
+htmlcov/
+*.log
+
+# Not needed to build or run the image
+tests/
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.prod.yml

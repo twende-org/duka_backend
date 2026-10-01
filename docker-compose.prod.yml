@@ -1,0 +1,147 @@
+name: duka-backend-prod
+
+# Production stack for the shared *.twendedigital.tech host.
+#
+# Traefik v3 is already running there and owns ports 80/443 plus TLS, so this
+# file attaches to the pre-existing external `proxy` network instead of defining
+# a proxy of its own. Nothing is published on the host.
+#
+#   backend.twendedigital.tech  ->  api (gunicorn :8000)
+#                                    ├─ db      postgres:16-alpine
+#                                    ├─ redis   redis:7-alpine
+#                                    ├─ worker  same image as api
+#                                    └─ beat    same image as api
+#
+# One-time setup on the server:
+#   git clone git@github.com:twende-org/duka_backend.git ~/duka_backend
+#   cd ~/duka_backend && cp .env.example .env && $EDITOR .env
+#     DJANGO_DEBUG=False, DJANGO_SECRET_KEY, DJANGO_ALLOWED_HOSTS,
+#     CORS_ALLOWED_ORIGINS / CSRF_TRUSTED_ORIGINS, POSTGRES_PASSWORD,
+#     GOOGLE_CLIENT_ID, and BACKEND_IMAGE if you pull rather than build.
+#
+# Deploy:
+#   docker compose -f docker-compose.prod.yml pull      # or: build
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# If the previous monorepo stack is still running, stop its backend services
+# first — both would claim the same Traefik host rule and container names:
+#   cd ~/multi-frontend && docker compose stop backend_api celery_worker celery_beat
+
+x-backend: &backend
+  # `image` wins at runtime: `pull` fetches the CI-pushed tag, `build` retags the
+  # local build to the same name so worker/beat reuse it.
+  image: ${BACKEND_IMAGE:-duka_backend:latest}
+  build: .
+  env_file:
+    - .env
+  environment: &backend-env
+    # Hard overrides so a stale .env cannot point a container at localhost, and
+    # so api/worker/beat and the db service always agree on the credentials.
+    POSTGRES_HOST: db
+    POSTGRES_PORT: "5432"
+    POSTGRES_DB: ${POSTGRES_DB:-duka_backend_db}
+    POSTGRES_USER: ${POSTGRES_USER:-duka_backend}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env before first deploy}
+    CELERY_BROKER_URL: redis://redis:6379/0
+    REDIS_CACHE_URL: redis://redis:6379/1
+  networks:
+    - proxy
+  restart: always
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: duka_backend_db
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-duka_backend_db}
+      POSTGRES_USER: ${POSTGRES_USER:-duka_backend}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env before first deploy}
+    networks:
+      - proxy
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-duka_backend} -d ${POSTGRES_DB:-duka_backend_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: duka_backend_redis
+    restart: always
+    networks:
+      - proxy
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    <<: *backend
+    container_name: duka_backend_api
+    environment:
+      <<: *backend-env
+      # The web container owns migrate + collectstatic; worker/beat set it to 0
+      # so they never race the schema on a fresh deploy.
+      RUN_MIGRATIONS: "1"
+    volumes:
+      - media:/app/media
+      - staticfiles:/app/staticfiles
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.duka_backend_api.rule=Host(`${BACKEND_HOST:-backend.twendedigital.tech}`)"
+      - "traefik.http.routers.duka_backend_api.entrypoints=websecure"
+      - "traefik.http.routers.duka_backend_api.tls.certresolver=myresolver"
+      - "traefik.http.routers.duka_backend_api.service=duka_backend_api_service"
+      - "traefik.http.services.duka_backend_api_service.loadbalancer.server.port=8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  worker:
+    <<: *backend
+    container_name: duka_backend_worker
+    command: celery -A config worker -l info
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+    volumes:
+      - media:/app/media
+
+  beat:
+    <<: *backend
+    container_name: duka_backend_beat
+    command: celery -A config beat -l info
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+    # No volume: the schedule file lives in /tmp/celerybeat-schedule and is
+    # rebuilt from CELERY_BEAT_SCHEDULE on start (see README).
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  db_data:
+    name: duka_backend_db_data
+  redis_data:
+    name: duka_backend_redis_data
+  media:
+    name: duka_backend_media
+  staticfiles:
+    name: duka_backend_staticfiles

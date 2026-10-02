@@ -61,6 +61,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # Registers the trigram lookup (``trigram_word_similar``) used by
+    # apps/core/search.py for typo-tolerant candidates on PostgreSQL.
+    'django.contrib.postgres',
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',

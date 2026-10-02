@@ -1,7 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from api.v1.views.shops import ShopViewSet, BranchViewSet, UserRoleViewSet, InvitationViewSet
-from api.v1.views.public import PublicShopViewSet
+from api.v1.views.public import (
+    PublicProductSearchView, PublicShopViewSet, PublicTrendingSearchesView,
+)
 from api.v1.views.products import (
     ProductViewSet, CategoryViewSet, MerchantCategoryViewSet,
     InventoryViewSet, InventoryMovementViewSet, StockTransferViewSet,
@@ -110,6 +112,11 @@ router.register(r'addresses', AddressViewSet, basename='address')
 router.register(r'social-logs', SocialLogViewSet, basename='social-log')
 
 urlpatterns = [
+    # Cross-shop storefront search (legacy browser-side discoveryService +
+    # IntelligentSearchBar suggestions) and popular-query suggestions built
+    # from the search_query/search_submitted telemetry stream.
+    path('public/products/search/', PublicProductSearchView.as_view(), name='public-product-search'),
+    path('public/trending-searches/', PublicTrendingSearchesView.as_view(), name='public-trending-searches'),
     # Customer portal: cross-shop, caller-scoped reads (not router resources).
     path('portal/orders/', PortalOrderListView.as_view(), name='portal-orders'),
     path('portal/receipts/', PortalReceiptListView.as_view(), name='portal-receipts'),

@@ -5,9 +5,17 @@ from .models import Shop, Branch, UserRole
 # pyrefly: ignore [missing-import]
 from apps.core.legacy import is_uuid
 # pyrefly: ignore [missing-import]
+from apps.core.search import SearchField, search_queryset
+# pyrefly: ignore [missing-import]
 from apps.users.models import User
 
 _NON_SLUG = re.compile(r'[^a-z0-9]+')
+
+SHOP_SEARCH_FIELDS = (
+    SearchField('name', 10),
+    SearchField('location', 7),
+    SearchField('description', 4),
+)
 
 def get_user_shops(*, user: User) -> QuerySet[Shop]:
     """
@@ -31,8 +39,12 @@ def app_slug(value: str) -> str:
 
 
 def get_public_shops(*, is_public=None, is_wholesale_supplier=None,
-                     search=None, slug=None) -> QuerySet[Shop]:
-    """Storefront shop list. ``None`` filters are ignored; omit is_public to see all."""
+                     search=None, slug=None):
+    """Storefront shop list. ``None`` filters are ignored; omit is_public to see all.
+
+    A meaningful ``search`` comes back as a ranked list (name beats location
+    beats description, typo-tolerant); an empty/noise query keeps the queryset.
+    """
     shops = Shop.objects.all()
     if is_public is not None:
         shops = shops.filter(isPublic=is_public)
@@ -40,13 +52,7 @@ def get_public_shops(*, is_public=None, is_wholesale_supplier=None,
         shops = shops.filter(isWholesaleSupplier=is_wholesale_supplier)
     if slug:
         shops = shops.filter(slug=slug)
-    if search:
-        shops = shops.filter(
-            Q(name__icontains=search)
-            | Q(description__icontains=search)
-            | Q(location__icontains=search)
-        )
-    return shops
+    return search_queryset(shops, search, SHOP_SEARCH_FIELDS)
 
 
 def get_shop_by_identifier(identifier: str):

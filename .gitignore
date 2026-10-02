@@ -28,6 +28,8 @@ celerybeat-schedule*
 celerybeat.pid
 
 # Test and coverage output
+# The test suite stays in the app monorepo; this deploy repo ships without it.
+tests/
 .coverage
 .coverage.*
 htmlcov/

@@ -16,9 +16,11 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
-#: The models the legacy browser helpers requested.
+#: The models the legacy browser helpers requested. gemini-1.5-flash was
+#: retired on OpenRouter (400 "not a valid model ID"), so vision calls move
+#: to the same live model the invoice intake uses.
 CHAT_MODEL = 'google/gemini-2.5-flash-lite'
-VISION_MODEL = 'google/gemini-1.5-flash'
+VISION_MODEL = 'google/gemini-2.5-flash'
 CHAT_TIMEOUT = 20
 VISION_TIMEOUT = 30
 MAX_TOKENS = 1000
@@ -151,6 +153,25 @@ Rules:
 - Any other readable detail that does not fit those fields (e.g. flavour, material, storage instructions) should be added as an extra key with a string value.
 - If the image shows no products at all, return {"products": []}."""
 
+#: Category names the caller injects into the prompt. The product form only
+#: accepts the merchant's own category list, so steering the model to reuse
+#: those names verbatim keeps the apply-time match rate high.
+MAX_CATEGORY_HINTS = 40
+
+
+def _category_hint(category_hints):
+    """Prompt sentence that offers the shop's own category names, or ''."""
+    if not category_hints:
+        return ''
+    names = [str(name).strip() for name in category_hints if str(name).strip()]
+    if not names:
+        return ''
+    return (
+        ' Known categories for this shop: '
+        + ', '.join(names[:MAX_CATEGORY_HINTS])
+        + '. Reuse one of them verbatim when a product fits; otherwise invent a short category.'
+    )
+
 
 def _api_key():
     key = getattr(settings, 'OPENROUTER_API_KEY', '')
@@ -281,20 +302,22 @@ def _clean_product(entry):
     return details
 
 
-def extract_product_details(image):
+def extract_product_details(image, category_hints=None):
     """Product fields read off a photo (legacy image extraction call).
 
     ``image`` is the data URL the camera capture produced. Known product fields
     survive as trimmed strings or coerced numbers and anything else readable
     lands in ``extra`` (see :func:`_clean_product`); an answer without usable
-    JSON raises :class:`AssistantError`.
+    JSON raises :class:`AssistantError`. ``category_hints`` (the shop's own
+    category names) is appended to the prompt so the returned ``category``
+    matches the form's dropdown.
     """
     data = _post({
         'model': VISION_MODEL,
         'messages': [{
             'role': 'user',
             'content': [
-                {'type': 'text', 'text': EXTRACTION_PROMPT},
+                {'type': 'text', 'text': EXTRACTION_PROMPT + _category_hint(category_hints)},
                 {'type': 'image_url', 'image_url': {'url': image}},
             ],
         }],
@@ -310,21 +333,23 @@ def extract_product_details(image):
     return _clean_product(parsed)
 
 
-def extract_product_list(image):
+def extract_product_list(image, category_hints=None):
     """Distinct products read off one photo, most prominent first.
 
     ``image`` is the data URL the camera capture produced. Same field cleaning
     as :func:`extract_product_details`; entries without a usable name are
     dropped and the answer is capped at :data:`MAX_PRODUCTS_PER_PHOTO`. An
     answer without usable JSON raises :class:`AssistantError`; an image with
-    no products yields an empty list.
+    no products yields an empty list. ``category_hints`` (the shop's own
+    category names) is appended to the prompt so returned ``category`` values
+    match the form's dropdown.
     """
     data = _post({
         'model': VISION_MODEL,
         'messages': [{
             'role': 'user',
             'content': [
-                {'type': 'text', 'text': MULTI_EXTRACTION_PROMPT},
+                {'type': 'text', 'text': MULTI_EXTRACTION_PROMPT + _category_hint(category_hints)},
                 {'type': 'image_url', 'image_url': {'url': image}},
             ],
         }],

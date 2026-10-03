@@ -12,6 +12,7 @@ from api.v1.serializers.products import (
 )
 from apps.products.services import adjust_inventory, bulk_import_products
 from apps.shops.models import Branch, Shop
+from apps.shops.services import ensure_main_branch
 from apps.shops.permissions import ShopScopedQuerysetMixin, assert_shop_access
 from apps.core.legacy import LegacyLookupMixin, filter_by_ref, resolve_legacy_pk
 from apps.core.utils import first_param
@@ -228,16 +229,19 @@ class InventoryMovementViewSet(LegacyLookupMixin, ShopScopedQuerysetMixin, views
         branch_ref = data.get('branch_id')
         if branch_ref:
             branch = Branch.objects.filter(id=resolve_legacy_pk(Branch, branch_ref)).first()
+            if branch is None:
+                raise NotFound({"detail": f"Branch with ID {branch_ref} not found."})
         else:
             # The app's product-only callers omit the branch: stock the product's
-            # own branch, else the shop's main (or first) branch.
+            # own branch, else the shop's main (or first) branch — creating a
+            # Main Branch for Firestore-imported shops that never had one, so
+            # initial stock is not silently dropped.
             branch = (
                 product.branch
                 or Branch.objects.filter(shop_id=product.shop_id, is_main=True).first()
                 or Branch.objects.filter(shop_id=product.shop_id).order_by('created_at').first()
+                or ensure_main_branch(product.shop)
             )
-        if branch is None:
-            raise NotFound({"detail": f"Branch with ID {branch_ref or 'default'} not found."})
 
         assert_shop_access(request.user, branch.shop_id)
 

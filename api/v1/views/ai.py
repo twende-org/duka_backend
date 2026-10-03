@@ -16,6 +16,14 @@ from apps.core import assistant
 from apps.core.utils import first_param
 
 
+def _category_hints(data):
+    """The shop's own category names from the body (``categoryNames`` list)."""
+    names = first_param(data, 'categoryNames', 'category_names')
+    if not isinstance(names, list):
+        return None
+    return [name for name in (str(n).strip() for n in names) if name]
+
+
 class AIAssistantView(APIView):
     """``POST /api/v1/ai/assistant/`` -> ``{"reply": "..."}``.
 
@@ -50,9 +58,11 @@ class AIAssistantView(APIView):
 class AIProductExtractionView(APIView):
     """``POST /api/v1/ai/extract-product/`` -> ``{"details": {...}}``.
 
-    Body: ``{image}`` where ``image`` is the compressed data URL the camera
-    capture produced. Only the known product fields come back, as non-empty
-    strings, ready to prefill the product form.
+    Body: ``{image, categoryNames?}`` where ``image`` is the compressed data
+    URL the camera capture produced. ``categoryNames`` is the shop's own
+    category list, injected into the prompt so the returned ``category``
+    matches the product form's dropdown. Only the known product fields come
+    back, as non-empty strings, ready to prefill the product form.
     """
 
     permission_classes = [IsAuthenticated]
@@ -65,7 +75,7 @@ class AIProductExtractionView(APIView):
                 {'detail': 'image is required.'}, status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            details = assistant.extract_product_details(image)
+            details = assistant.extract_product_details(image, category_hints=_category_hints(data))
         except assistant.AssistantError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         return Response({'details': details})
@@ -74,7 +84,9 @@ class AIProductExtractionView(APIView):
 class AIProductListExtractionView(APIView):
     """``POST /api/v1/ai/extract-products/`` -> ``{"details": [{...}, ...]}``.
 
-    Body: ``{image}`` where the photo may hold several distinct products.
+    Body: ``{image, categoryNames?}`` where the photo may hold several
+    distinct products and ``categoryNames`` is the shop's own category list
+    (steers the returned ``category`` values to the form's dropdown).
     Distinct entries come back most prominent first, nameless ones dropped,
     capped at 20 — ready to queue into the product form.
     """
@@ -89,7 +101,7 @@ class AIProductListExtractionView(APIView):
                 {'detail': 'image is required.'}, status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            details = assistant.extract_product_list(image)
+            details = assistant.extract_product_list(image, category_hints=_category_hints(data))
         except assistant.AssistantError as exc:
             return Response({'detail': str(exc)}, status=exc.status_code)
         return Response({'details': details})

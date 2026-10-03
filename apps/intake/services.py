@@ -28,6 +28,7 @@ from .ai_extract import extract_invoice_items
 from .barcode import decode_qr_from_image
 from .models import IntakeBatch, ProductDraft
 from .qr import parse_wholesale_qr
+from .quota import QuotaExhausted, assert_quota
 from .tra import classify_tra
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,10 @@ def process_intake_batch(batch_id):
         batch.engine_used = engine
         batch.item_count = len(grouped)
         batch.status = 'completed'
+    except QuotaExhausted as exc:
+        logger.info('Intake batch %s stopped by quota: %s', batch_id, exc)
+        batch.status = 'failed'
+        batch.error_message = str(exc)
     except AssistantError as exc:
         logger.warning('Intake batch %s failed: %s', batch_id, exc)
         batch.status = 'failed'
@@ -207,6 +212,13 @@ def _extract_items(batch, usage):
         raise ValueError(
             'QR payload did not match the Twende Duka wholesale format and no '
             'invoice image was provided to fall back on.')
+
+    # AI allowance gate: stop before the first vision call so an over-limit
+    # batch spends nothing (and fails with the friendly quota message).
+    assert_quota(
+        batch.shop,
+        sum(1 for s in batch.sources if s.get('kind') in ('image', 'url')),
+    )
 
     hints = _shop_category_hints(batch.shop)
     items = []

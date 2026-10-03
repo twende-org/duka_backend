@@ -45,7 +45,7 @@ from api.v1.views.portal import PortalOrderListView, PortalReceiptListView
 from api.v1.views.identity import ResolveIdentityView
 from api.v1.views.uploads import MediaUploadView
 from api.v1.views.support import AnnouncementViewSet, SupportTicketViewSet
-from api.v1.views.intake import IntakeBatchViewSet, ProductDraftViewSet
+from api.v1.views.intake import IntakeBatchViewSet, IntakeQuotaView, ProductDraftViewSet
 
 router = DefaultRouter()
 router.register(r'public/shops', PublicShopViewSet, basename='public-shop')
@@ -166,5 +166,8 @@ urlpatterns = [
     path('identity/resolve/', ResolveIdentityView.as_view(), name='identity-resolve'),
     # Product/shop image uploads (legacy Firebase Storage in src/lib/imageUtils.ts).
     path('uploads/', MediaUploadView.as_view(), name='media-upload'),
+    # Monthly AI photo allowance per shop. Standalone path BEFORE the router
+    # include: the inventory/intake detail pattern would swallow 'quota' as a pk.
+    path('inventory/intake/quota/', IntakeQuotaView.as_view(), name='intake-quota'),
     path('', include(router.urls)),
 ]

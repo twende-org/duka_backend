@@ -73,12 +73,16 @@ class ShopViewSet(LegacyLookupMixin, viewsets.ModelViewSet):
     def get_serializer(self, *args, **kwargs):
         # Admin approval (``isPublic``) is the platform's final publish gate:
         # a merchant cannot list their own shop on the marketplace — only the
-        # platform admin's Approve/Revoke toggle flips it.
+        # platform admin's Approve/Revoke toggle flips it. The AI intake
+        # allowance override (``aiIntakeMonthlyLimit``) is admin-set too: a
+        # merchant cannot raise their own monthly photo budget.
         data = kwargs.get('data')
         if data is not None and not (self.request.user.is_staff or self.request.user.is_superuser):
             data = data.copy()
             data.pop('isPublic', None)
             data.pop('is_public', None)
+            data.pop('aiIntakeMonthlyLimit', None)
+            data.pop('ai_intake_monthly_limit', None)
             kwargs['data'] = data
         return super().get_serializer(*args, **kwargs)
 

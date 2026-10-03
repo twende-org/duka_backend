@@ -39,6 +39,12 @@ class ShopSerializer(serializers.ModelSerializer):
     # Read-only: follower_count only moves through the public follow/unfollow
     # actions, mirroring the Firestore rule that allowed just this key to change.
     followerCount = serializers.IntegerField(source='follower_count', read_only=True)
+    # Platform admin's per-shop AI intake allowance override (null = global
+    # default); non-staff writes are stripped in the viewset.
+    aiIntakeMonthlyLimit = serializers.IntegerField(
+        source='ai_intake_monthly_limit', required=False, allow_null=True,
+        min_value=0, max_value=32767,
+    )
     # The merchant dashboard shows this stat; it used to be a Firestore counter
     # field, now derived from the real product rows on read.
     productCount = serializers.SerializerMethodField()

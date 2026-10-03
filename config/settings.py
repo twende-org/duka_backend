@@ -288,6 +288,12 @@ AI_INTAKE_MODEL = os.environ.get('AI_INTAKE_MODEL', 'google/gemini-2.5-flash')
 AI_INTAKE_MODEL_STRONG = os.environ.get('AI_INTAKE_MODEL_STRONG', 'google/gemini-2.5-pro')
 AI_INTAKE_MIN_CONFIDENCE = float(os.environ.get('AI_INTAKE_MIN_CONFIDENCE', '0.6'))
 
+# Monthly AI-parsed photo allowance per shop (QR intake is free and never
+# gated). Counted from IntakeBatch.ai_usage on engine_used='ai' batches in the
+# calendar month. 0 disables the limit; per-shop overrides live on
+# Shop.ai_intake_monthly_limit (null = this default).
+AI_INTAKE_MONTHLY_LIMIT_PER_SHOP = int(os.environ.get('AI_INTAKE_MONTHLY_LIMIT_PER_SHOP', '20'))
+
 # Delivery App sync (apps.core.delivery_sync)
 # Port of functions/src/sync/deliverySync.js: mirrors published products into a
 # *second* Firebase project (the courier marketplace). Remote writes leave this

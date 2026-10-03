@@ -89,6 +89,10 @@ class Shop(CoreModel):
     # exposed via follow/unfollow actions rather than the general update path.
     follower_count = models.PositiveIntegerField(default=0)
 
+    # AI intake photo allowance override for this shop (admin-settable):
+    # null follows the AI_INTAKE_MONTHLY_LIMIT_PER_SHOP default, 0 = unlimited.
+    ai_intake_monthly_limit = models.PositiveSmallIntegerField(null=True, blank=True)
+
     class Meta:
         ordering = ['-created_at']
 

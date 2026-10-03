@@ -8,15 +8,17 @@ parsing happens on a background thread and the client polls the batch.
 from django.core.exceptions import ValidationError
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import NotFound, ValidationError as DRFValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from api.v1.serializers.intake import IntakeBatchSerializer, ProductDraftSerializer
 from apps.core.legacy import LegacyLookupMixin, filter_by_ref
 from apps.core.utils import first_param
 from apps.intake.models import IntakeBatch, ProductDraft
+from apps.intake.quota import ai_images_used, get_shop_limit
 from apps.intake.services import apply_intake_batch, create_intake_batch, dispatch_intake_processing
 from apps.shops.models import Shop
 from apps.shops.permissions import ShopScopedQuerysetMixin, assert_shop_access
@@ -118,6 +120,32 @@ class IntakeBatchViewSet(LegacyLookupMixin, ShopScopedQuerysetMixin, viewsets.Mo
         return Response({
             'summary': summary,
             'batch': self.get_serializer(batch).data,
+        })
+
+
+class IntakeQuotaView(APIView):
+    """Monthly AI photo allowance for one shop (merchant badge + admin editor).
+
+    Staff/superusers may read any shop; everyone else needs a role in the shop.
+    ``limit``/``remaining`` are null when the shop is unlimited.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        shop_ref = first_param(request.query_params, 'shop_id', 'shopId')
+        if not shop_ref:
+            raise DRFValidationError({'shop_id': ['This query parameter is required.']})
+        shop = filter_by_ref(Shop.objects.all(), 'id', shop_ref, Shop).first()
+        if shop is None:
+            raise NotFound('Shop not found.')
+        if not (request.user.is_staff or request.user.is_superuser):
+            assert_shop_access(request.user, shop.id)
+        limit = get_shop_limit(shop)
+        used = ai_images_used(shop)
+        return Response({
+            'limit': limit,
+            'used': used,
+            'remaining': None if limit is None else max(0, limit - used),
         })
 
 

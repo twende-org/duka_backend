@@ -1,8 +1,18 @@
 """Facebook / Instagram posting pipeline.
 
 Ported from ``functions/src/social/facebookPost.js``: caption generation via
-OpenRouter, image or reel publishing (Graph v18.0), the Instagram reel polling
-loop with image fallback, and the ``social_logs`` / campaign bookkeeping.
+OpenRouter (cheapest-tier model, bounded tokens, per-process cache), image or
+reel publishing (Graph v18.0), exponential backoff on rate-limit / server
+errors, the Instagram reel polling loop with single-image fallback, and the
+``social_logs`` / campaign bookkeeping.
+
+Execution contracts that must not drift:
+- Tests patch ``apps.social.posting.requests.post`` / ``.get`` and
+  ``time.sleep``: every outbound call goes through the module-level
+  ``requests`` attribute with the kwargs shapes the suite asserts on.
+- ``perform_facebook_post`` raises ``FacebookNotConnected`` /
+  ``ProductNotFound`` before any Graph call and ``SocialPostFailed`` after a
+  recorded failure; Instagram failures never fail the post (legacy).
 """
 import json
 import logging
@@ -34,14 +44,47 @@ from apps.social.services import graph_url
 
 logger = logging.getLogger(__name__)
 
-STOREFRONT_BASE_URL = 'https://duka.twendedigital.tech'
-OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
-OPENROUTER_MODEL = 'openai/gpt-4o-mini'
-AI_TIMEOUT = 10
-AI_ATTEMPTS = 3
-GRAPH_TIMEOUT = 30
+# --- isolated client configuration -----------------------------------------
+# Hard 10-second connect/read frames on every outbound call. Graph bodies are
+# tiny (URLs, not uploads) so a 10 s read frame is generous; a hung socket
+# must never park a Celery worker.
+GRAPH_CONNECT_TIMEOUT = 10
+GRAPH_READ_TIMEOUT = 10
+GRAPH_TIMEOUT = (GRAPH_CONNECT_TIMEOUT, GRAPH_READ_TIMEOUT)
+AI_TIMEOUT = (10, 10)
+
+# Realistic desktop-browser UA so outbound calls don't pick up datacenter bot
+# classification on either Meta or the LLM gateway.
+BROWSER_USER_AGENT = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+)
+BASE_HEADERS = {'User-Agent': BROWSER_USER_AGENT, 'Accept': 'application/json'}
+
+# Graph retry ladder: 429 (rate limited) and 5xx are transient; honour
+# Retry-After when Meta sends it, otherwise exponential 2s/4s/8s capped at 30s.
+GRAPH_MAX_RETRIES = 3
+GRAPH_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+GRAPH_BACKOFF_BASE_SECONDS = 2
+GRAPH_BACKOFF_CAP_SECONDS = 30
+
+# Reel container polling ceiling: 36 x 5s = 3 minutes, as in legacy.
 REEL_POLL_ATTEMPTS = 36
 REEL_POLL_INTERVAL = 5
+
+# --- caption synthesis (OpenRouter, cost-minimised) --------------------------
+OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+# flash-lite is the cheapest capable tier and matches the webhook auto-reply,
+# insights and assistant models — one model family to reason about.
+OPENROUTER_MODEL = 'google/gemini-2.5-flash-lite'
+AI_MAX_TOKENS = 250
+AI_ATTEMPTS = 3
+# Per-process caption cache: retries, re-posts and drip retries of the same
+# product inside one window reuse the caption instead of a paid LLM call.
+CAPTION_CACHE_TTL_SECONDS = 6 * 3600
+CAPTION_CACHE_MAX_ENTRIES = 256
+
+STOREFRONT_BASE_URL = 'https://duka.twendedigital.tech'
 
 STRATEGY_DEFAULT = 'promotional na ya kuvutia'
 STRATEGY_MORNING = (
@@ -84,11 +127,59 @@ class SocialPostFailed(SocialPostError):
     """The post did not complete; already recorded in ``social_logs``."""
 
 
+# --- HTTP plumbing ------------------------------------------------------------
+
+def _retry_delay(response, attempt):
+    retry_after = None
+    if response is not None:
+        retry_after = (response.headers or {}).get('Retry-After')
+    if retry_after and str(retry_after).isdigit():
+        return min(int(retry_after), GRAPH_BACKOFF_CAP_SECONDS)
+    return min(GRAPH_BACKOFF_BASE_SECONDS ** attempt, GRAPH_BACKOFF_CAP_SECONDS)
+
+
+def _request_with_retries(method, url, **kwargs):
+    """Single outbound frame with backoff on 429/5xx.
+
+    Returns the decoded JSON object. Raises the underlying
+    ``requests.HTTPError`` / ``requests.RequestException`` so the Graph
+    wrappers keep their exact error-classification contract.
+    """
+    request_fn = requests.post if method == 'post' else requests.get
+    kwargs.setdefault('headers', dict(BASE_HEADERS))
+    kwargs.setdefault('timeout', GRAPH_TIMEOUT)
+    for attempt in range(GRAPH_MAX_RETRIES + 1):
+        try:
+            response = request_fn(url, **kwargs)
+            status = response.status_code
+            if status in GRAPH_RETRY_STATUSES and attempt < GRAPH_MAX_RETRIES:
+                delay = _retry_delay(response, attempt)
+                logger.warning(
+                    'Graph %s %s returned %s; retrying in %ss (attempt %s/%s).',
+                    method.upper(), url, status, delay, attempt + 1, GRAPH_MAX_RETRIES,
+                )
+                time.sleep(delay)
+                continue
+            response.raise_for_status()
+            body = response.json()
+            return body if isinstance(body, dict) else {}
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            if status in GRAPH_RETRY_STATUSES and attempt < GRAPH_MAX_RETRIES:
+                delay = _retry_delay(exc.response, attempt)
+                logger.warning(
+                    'Graph %s %s failed (%s); retrying in %ss (attempt %s/%s).',
+                    method.upper(), url, status, delay, attempt + 1, GRAPH_MAX_RETRIES,
+                )
+                time.sleep(delay)
+                continue
+            raise
+    raise GraphApiError(f'Graph {method} {url} failed after {GRAPH_MAX_RETRIES} retries.')  # pragma: no cover
+
+
 def _graph_post(path, payload):
     try:
-        response = requests.post(graph_url(path), data=payload, timeout=GRAPH_TIMEOUT)
-        response.raise_for_status()
-        body = response.json()
+        return _request_with_retries('post', graph_url(path), data=payload)
     except requests.HTTPError as exc:
         detail = None
         if exc.response is not None:
@@ -101,19 +192,15 @@ def _graph_post(path, payload):
         raise GraphApiError(str(exc)) from exc
     except ValueError as exc:
         raise GraphApiError('Invalid JSON from Facebook.') from exc
-    return body if isinstance(body, dict) else {}
 
 
 def _graph_get(path, params):
     try:
-        response = requests.get(graph_url(path), params=params, timeout=GRAPH_TIMEOUT)
-        response.raise_for_status()
-        body = response.json()
+        return _request_with_retries('get', graph_url(path), params=params)
     except requests.RequestException as exc:
         raise GraphApiError(str(exc)) from exc
     except ValueError as exc:
         raise GraphApiError('Invalid JSON from Facebook.') from exc
-    return body if isinstance(body, dict) else {}
 
 
 def _error_text(exc):
@@ -121,6 +208,8 @@ def _error_text(exc):
         return json.dumps(exc.payload)
     return str(exc)
 
+
+# --- caption synthesis ---------------------------------------------------------
 
 def format_price(value):
     """``Decimal('1200.00')`` -> ``'1,200'`` (JS ``toLocaleString`` parity)."""
@@ -139,17 +228,53 @@ def caption_strategy(eat_hour):
     return STRATEGY_DEFAULT
 
 
+# Per-process caption cache: (key -> (expires_at, caption)). Process-local by
+# design — each Celery worker keeps its own window, no shared state to manage.
+_caption_cache = {}
+
+
+def _cache_key(product, price_str, tone, strategy, day):
+    # Product identity + commercial inputs + strategy window: a price change,
+    # rename, tone switch or new day invalidates the entry naturally.
+    return (str(product.pk), product.name, price_str, tone or '', strategy, day)
+
+
+def _cache_get(key):
+    entry = _caption_cache.get(key)
+    if not entry:
+        return None
+    expires_at, caption = entry
+    if expires_at < time.time():
+        _caption_cache.pop(key, None)
+        return None
+    return caption
+
+
+def _cache_set(key, caption):
+    if len(_caption_cache) >= CAPTION_CACHE_MAX_ENTRIES:
+        _caption_cache.pop(next(iter(_caption_cache)), None)  # FIFO eviction
+    _caption_cache[key] = (time.time() + CAPTION_CACHE_TTL_SECONDS, caption)
+
+
 def generate_ai_caption(product, shop, price_str, tone=None, now=None):
     """Caption from OpenRouter, or ``None`` when it cannot be produced.
 
-    Mirrors the legacy retry loop: 3 attempts, 10 s per attempt, markdown
-    fences stripped; a total failure only means the caller uses the fallback.
+    Cost ladder: per-process cache first, then a 3-attempt call ladder with
+    hard 10 s frames; a total failure only means the caller falls back to the
+    plain-text template. Markdown fences (incl. ``json``) are stripped.
     """
     api_key = getattr(settings, 'OPENROUTER_API_KEY', '')
     if not api_key:
         return None
 
-    strategy = caption_strategy((now or timezone.now()).astimezone(dt_timezone.utc).hour + 3)
+    utc_now = (now or timezone.now()).astimezone(dt_timezone.utc)
+    strategy = caption_strategy(utc_now.hour + 3)
+    key = _cache_key(product, price_str, tone, strategy, utc_now.date().isoformat())
+    cached = _cache_get(key)
+    if cached:
+        logger.info('Reusing cached AI caption for product %s.', product.pk)
+        return cached
+
     tone_instructions = ''
     if tone:
         tone_instructions = (
@@ -166,7 +291,7 @@ Bei: {price_str}
 Maelezo: {product.description or "Hakuna maelezo. Buni maelezo mafupi kulingana na jina la bidhaa."}
 Duka: {shop.name} (Simu: {shop.phone or "DM kuweka oda"})
 
-Jibu na MANENO YA CAPTION PEKEE. Usimsalimie mtu. Mwishoni weka hashtags zinazovuma zinazoendana na bidhaa (ZISIZIDI 4). 
+Jibu na MANENO YA CAPTION PEKEE. Usimsalimie mtu. Mwishoni weka hashtags zinazovuma zinazoendana na bidhaa (ZISIZIDI 4).
 SHERIA KALI: USITUMIE markdown. Usiweke json block. Rudisha maandishi ya kawaida tu. Usiandike "Here is the caption:".'''
 
     for attempt in range(1, AI_ATTEMPTS + 1):
@@ -178,10 +303,12 @@ SHERIA KALI: USITUMIE markdown. Usiweke json block. Rudisha maandishi ya kawaida
                     'model': OPENROUTER_MODEL,
                     'messages': [{'role': 'user', 'content': prompt}],
                     'temperature': 0.7,
+                    'max_tokens': AI_MAX_TOKENS,
                 },
                 headers={
                     'Authorization': f'Bearer {api_key}',
                     'Content-Type': 'application/json',
+                    'User-Agent': BROWSER_USER_AGENT,
                 },
                 timeout=AI_TIMEOUT,
             )
@@ -189,12 +316,16 @@ SHERIA KALI: USITUMIE markdown. Usiweke json block. Rudisha maandishi ya kawaida
             choices = response.json().get('choices') or []
             caption = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
             if caption:
-                return re.sub(r'```(?:json)?', '', caption, flags=re.IGNORECASE).strip()
+                caption = re.sub(r'```(?:json)?', '', caption, flags=re.IGNORECASE).strip()
+                _cache_set(key, caption)
+                return caption
         except (requests.RequestException, ValueError, AttributeError, IndexError) as exc:
             logger.warning('AI caption attempt %s failed: %s', attempt, exc)
     logger.error('All %s AI caption attempts failed; using the fallback caption.', AI_ATTEMPTS)
     return None
 
+
+# --- product resolution + payload assembly ------------------------------------
 
 def _collect_image_urls(products):
     raw = []
@@ -214,6 +345,7 @@ def _collect_image_urls(products):
 def _append_contact_details(message, shop, post_format):
     phone = shop.whatsapp or shop.phone or ''
     if post_format == 'reel':
+        # Reels avoid outbound links to protect organic reach.
         message += '\n\n💬 DM us to order!'
         if phone:
             message += f'\n📞 Contact: {phone}'
@@ -240,6 +372,8 @@ def _resolve_products(product_refs):
             products.append(product)
     return products
 
+
+# --- publishers -----------------------------------------------------------------
 
 def _post_to_facebook(integration, access_token, message, image_urls, video_url, include_image):
     page_id = integration.page_id
@@ -343,6 +477,8 @@ def _post_to_instagram(integration, access_token, message, image_urls, video_url
         return None, video_fallback_reason, _error_text(exc)
 
 
+# --- bookkeeping ----------------------------------------------------------------
+
 def _record_log(shop, product_ids, **fields):
     try:
         SocialLog.objects.create(
@@ -375,7 +511,8 @@ def perform_facebook_post(
 ):
     """Publish ``product_refs`` to the shop's Facebook page (and Instagram).
 
-    Returns ``{'success': True, 'facebookPostId': ..., 'instagramPostId': ...}``.
+    Returns ``{'success': True, 'facebookPostId': ..., 'instagramPostId': ...}``
+    (plus ``'fallback_triggered': True`` when a reel degraded to a photo).
     Raises :class:`FacebookNotConnected` / :class:`ProductNotFound` before any
     Graph call, and :class:`SocialPostFailed` when publishing failed (the
     failure is recorded in ``social_logs`` first).
@@ -418,15 +555,30 @@ def perform_facebook_post(
 
     video_url = None
     video_fallback_reason = None
+    reel_fallback = False
+    instagram_skip_reason = None
     if post_format == 'reel' and include_image and image_urls:
         try:
+            # Reels are fetched over the public internet; without the
+            # absolute URL map there is nothing to attach to the Graph call.
+            # Raised here — before generate_reel_from_images — so no image or
+            # audio bytes are ever downloaded, and caught below so the post
+            # degrades to a single photo instead of crashing the worker.
+            if not getattr(settings, 'REEL_PUBLIC_BASE_URL', ''):
+                raise ReelGenerationError(
+                    'Environment config missing mandatory REEL_PUBLIC_BASE_URL parameter map'
+                )
             logger.info('Generating Reel for shop %s.', shop.pk)
             # The legacy generator also accepted a backgroundMusicUrl from the
             # shop/integration docs; no such field exists on the Django models.
             video_url = generate_reel_from_images(image_urls, None)
         except ReelGenerationError as exc:
-            logger.error('Reel generation failed, falling back to images: %s', exc)
+            logger.error('Reel generation failed, falling back to a single photo: %s', exc)
             video_fallback_reason = str(exc)
+            reel_fallback = True
+            instagram_skip_reason = (
+                'Skipped Instagram upload due to Reel format generation fallback requirements'
+            )
             video_url = None
 
     try:
@@ -439,10 +591,15 @@ def perform_facebook_post(
 
     instagram_post_id = None
     instagram_error = None
-    instagram_post_id, ig_fallback, instagram_error = _post_to_instagram(
-        integration, access_token, post_message, image_urls, video_url, post_format, include_image,
-    )
-    video_fallback_reason = video_fallback_reason or ig_fallback
+    if reel_fallback:
+        # Single-photo fallback workflow is Facebook-only; Instagram skipped.
+        instagram_error = instagram_skip_reason
+    else:
+        instagram_post_id, ig_fallback, instagram_error = _post_to_instagram(
+            integration, access_token, post_message, image_urls, video_url,
+            post_format, include_image,
+        )
+        video_fallback_reason = video_fallback_reason or ig_fallback
 
     _record_log(
         shop, product_ids, status='success',
@@ -452,8 +609,11 @@ def perform_facebook_post(
         instagram_error=instagram_error,
     )
     _record_campaign(shop, main_product, len(products), instagram_post_id, ai_marketing_config)
-    return {
+    result = {
         'success': True,
         'facebookPostId': facebook_post_id,
         'instagramPostId': instagram_post_id,
     }
+    if reel_fallback:
+        result['fallback_triggered'] = True
+    return result

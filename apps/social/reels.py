@@ -113,6 +113,19 @@ TRACK_URLS = [
 ]
 
 
+def estimate_reel_duration_seconds(image_count):
+    """Slideshow length for ``image_count`` stills — mirrors ``_ffmpeg_command``
+    (10 s single image, otherwise 4 s per still) with the same 20-still cap the
+    generator applies. Used to pre-check the reel against TikTok's per-account
+    ``max_video_post_duration_sec`` before any publish call fires."""
+    try:
+        count = int(image_count)
+    except (TypeError, ValueError):
+        count = 1
+    count = min(max(count, 1), MAX_REEL_IMAGES)
+    return SINGLE_IMAGE_DURATION if count == 1 else count * SECONDS_PER_IMAGE
+
+
 class ReelGenerationError(Exception):
     """The reel could not be built or published; caller falls back to images."""
 

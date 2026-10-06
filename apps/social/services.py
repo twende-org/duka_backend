@@ -94,6 +94,7 @@ def parse_oauth_state(state):
     shop_ref = state
     origin = DEFAULT_ORIGIN
     return_path = DEFAULT_RETURN_PATH
+    code_verifier = ''
     if state:
         try:
             decoded = base64.b64decode(str(state) + '=' * (-len(str(state)) % 4))
@@ -102,12 +103,14 @@ def parse_oauth_state(state):
                 shop_ref = str(state_obj['shopId'])
                 origin = state_obj.get('origin') or origin
                 return_path = state_obj.get('returnPath') or return_path
+                code_verifier = str(state_obj.get('codeVerifier') or '')
         except Exception:
             pass
     return {
         'shop_id': shop_ref,
         'origin': _safe_origin(origin),
         'return_path': _safe_return_path(return_path),
+        'code_verifier': code_verifier,
     }
 
 

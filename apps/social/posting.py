@@ -38,9 +38,12 @@ from apps.shops.models import Shop
 # pyrefly: ignore [missing-import]
 from apps.social.models import SocialIntegration, SocialLog
 # pyrefly: ignore [missing-import]
+from apps.social import reels
 from apps.social.reels import ReelGenerationError, generate_reel_from_images
 # pyrefly: ignore [missing-import]
 from apps.social.services import graph_url
+# pyrefly: ignore [missing-import]
+from apps.social import tiktok as tiktok_api
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +113,11 @@ class FacebookNotConnected(SocialPostError):
         super().__init__(message)
 
 
+class TikTokNotConnected(SocialPostError):
+    def __init__(self, message='tiktok-not-connected'):
+        super().__init__(message)
+
+
 class ProductNotFound(SocialPostError):
     def __init__(self, message='product-not-found'):
         super().__init__(message)
@@ -125,6 +133,20 @@ class GraphApiError(SocialPostError):
 
 class SocialPostFailed(SocialPostError):
     """The post did not complete; already recorded in ``social_logs``."""
+
+
+class TikTokVideoTooLong(SocialPostError):
+    """The generated video exceeds the account's ``max_video_post_duration_sec``."""
+
+    def __init__(self, message='tiktok-video-too-long'):
+        super().__init__(message)
+
+
+class TikTokPrivacyUnavailable(SocialPostError):
+    """The chosen privacy level is not in the account's ``privacy_level_options``."""
+
+    def __init__(self, message='tiktok-privacy-unavailable'):
+        super().__init__(message)
 
 
 # --- HTTP plumbing ------------------------------------------------------------
@@ -481,23 +503,25 @@ def _post_to_instagram(integration, access_token, message, image_urls, video_url
 
 def _record_log(shop, product_ids, **fields):
     try:
-        SocialLog.objects.create(
+        return SocialLog.objects.create(
             shop=shop, type='social_post', action='post', product_ids=product_ids, **fields,
         )
     except Exception:
         # Bookkeeping must never turn a published post into a retry.
         logger.exception('Failed to write the social log for shop %s.', shop.pk)
+        return None
 
 
-def _record_campaign(shop, main_product, product_count, instagram_post_id, ai_marketing_config):
+def _record_campaign(shop, main_product, product_count, instagram_post_id, ai_marketing_config,
+                     platform=None):
     try:
         # The Firestore campaign doc also carried budget/engagement counters
-        # that have no column on this model yet (marketing cutover owns that).
+        # that have no column on this model yet (marketing cutoff owns that).
         Campaign.objects.create(
             shop=shop,
             name=f'Social Post: {main_product.name}' + (' & others' if product_count > 1 else ''),
             source='ai_auto_pilot' if ai_marketing_config else 'manual',
-            platform='facebook_instagram' if instagram_post_id else 'facebook',
+            platform=platform or ('facebook_instagram' if instagram_post_id else 'facebook'),
             status='running',
             start_date=timezone.now(),
         )
@@ -617,3 +641,141 @@ def perform_facebook_post(
     if reel_fallback:
         result['fallback_triggered'] = True
     return result
+
+
+def perform_tiktok_post(
+    shop_ref, product_refs, message=None, include_image=True, post_format='reel',
+    ai_marketing_config=None, now=None, post_options=None,
+):
+    """Publish ``product_refs`` to the shop's TikTok account as a video.
+
+    TikTok's Content Posting API is video-only, so the single path is the same
+    reel pipeline the Facebook reel format uses (images -> MP4 -> PULL_FROM_URL).
+    Unlike Facebook there is no photo fallback: a reel generation failure is
+    recorded in ``social_logs`` and surfaces as :class:`SocialPostFailed`.
+
+    ``post_options`` carries the user's pre-publish choices (privacy_level,
+    disable_comment/disable_duet/disable_stitch, brand_content/brand_organic)
+    straight through to the video init call — they are never defaulted here.
+
+    Content Sharing Guidelines enforcement before the publish call fires:
+    the caption is posted exactly as the merchant wrote it (no appended
+    preset text), the chosen privacy level must be one of the account's
+    ``creator_info.privacy_level_options``, and the reel's estimated duration
+    must fit the account's ``max_video_post_duration_sec``. A failed
+    creator-info lookup only skips these checks — it never blocks a post.
+
+    Returns ``{'success': True, 'publishId': ...}``. Raises
+    :class:`TikTokNotConnected` / :class:`ProductNotFound` before any TikTok
+    call, :class:`TikTokVideoTooLong` / :class:`TikTokPrivacyUnavailable`
+    when the account cannot take the post, and :class:`SocialPostFailed` when
+    publishing failed.
+    """
+    if isinstance(product_refs, (str, bytes)):
+        product_refs = [product_refs]
+
+    shop = _resolve_shop(shop_ref)
+    integration = None
+    if shop is not None:
+        integration = SocialIntegration.objects.filter(
+            shop=shop, platform='tiktok', is_connected=True,
+        ).first()
+    if integration is None:
+        raise TikTokNotConnected()
+
+    products = _resolve_products(product_refs)
+    if not products:
+        raise ProductNotFound()
+
+    product_ids = [str(product.legacy_id or product.pk) for product in products]
+    main_product = products[0]
+    price_str = (
+        f'TZS {format_price(main_product.selling_price)}'
+        if main_product.selling_price else 'Bei Nafuu'
+    )
+
+    post_message = message
+    if not post_message:
+        tone = (ai_marketing_config or {}).get('tone')
+        post_message = generate_ai_caption(main_product, shop, price_str, tone=tone, now=now)
+    if not post_message:
+        post_message = f'{main_product.name} - {price_str}'
+        if main_product.description:
+            post_message += f'\n\n{main_product.description}'
+    # No _append_contact_details here: TikTok's guidelines forbid preset text
+    # the creator cannot edit — the caption ships exactly as written above.
+
+    image_urls = _collect_image_urls(products)
+    video_url = None
+    try:
+        if not getattr(settings, 'REEL_PUBLIC_BASE_URL', ''):
+            raise ReelGenerationError(
+                'Environment config missing mandatory REEL_PUBLIC_BASE_URL parameter map'
+            )
+        if not image_urls:
+            raise ReelGenerationError('No usable product images to build the TikTok video.')
+        logger.info('Generating TikTok video for shop %s.', shop.pk)
+        video_url = generate_reel_from_images(image_urls, None)
+    except ReelGenerationError as exc:
+        logger.error('TikTok video generation failed: %s', exc)
+        _record_log(shop, product_ids, status='failure', error=str(exc))
+        raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc
+
+    try:
+        access_token = tiktok_api.ensure_fresh_access_token(integration)
+    except tiktok_api.TikTokApiError as exc:
+        _record_log(shop, product_ids, status='failure', error=str(exc))
+        raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc
+
+    try:
+        creator_info = tiktok_api.fetch_creator_info(access_token)
+    except tiktok_api.TikTokApiError as exc:
+        # Metadata lookup only; a transient failure must not block publishing.
+        logger.warning('TikTok creator info unavailable for shop %s: %s', shop.pk, exc)
+        creator_info = None
+    if creator_info:
+        options = post_options or {}
+        privacy_level = options.get('privacy_level')
+        allowed = creator_info.get('privacyLevelOptions') or []
+        if privacy_level and allowed and privacy_level not in allowed:
+            detail = (
+                f'Privacy level {privacy_level} is not available on this TikTok account.'
+            )
+            _record_log(shop, product_ids, status='failure', error=detail)
+            raise TikTokPrivacyUnavailable(detail)
+        max_seconds = creator_info.get('maxVideoPostDurationSec') or 0
+        if max_seconds:
+            expected = reels.estimate_reel_duration_seconds(len(image_urls))
+            if expected > max_seconds:
+                detail = (
+                    f'Video would be about {expected}s but this TikTok account '
+                    f'allows at most {max_seconds}s. Use fewer product photos and try again.'
+                )
+                _record_log(shop, product_ids, status='failure', error=detail)
+                raise TikTokVideoTooLong(detail)
+
+    try:
+        publish_id = tiktok_api.initialize_video_post(
+            access_token, post_message, video_url, **(post_options or {}),
+        )
+    except tiktok_api.TikTokApiError as exc:
+        _record_log(shop, product_ids, status='failure', error=str(exc))
+        raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc
+
+    log = _record_log(shop, product_ids, status='success', tiktok_publish_id=publish_id)
+    if log is not None:
+        _schedule_tiktok_status_poll(log)
+    _record_campaign(
+        shop, main_product, len(products), None, ai_marketing_config, platform='tiktok',
+    )
+    return {'success': True, 'publishId': publish_id}
+
+
+def _schedule_tiktok_status_poll(log):
+    """Queue the publish-status poll; a down broker must never fail the post."""
+    try:
+        from apps.social.tasks import poll_tiktok_publish_status
+
+        poll_tiktok_publish_status.apply_async(args=[log.pk], countdown=60)
+    except Exception:
+        logger.warning('Could not schedule TikTok status poll for log %s.', log.pk, exc_info=True)

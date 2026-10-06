@@ -32,6 +32,10 @@ from api.v1.views.facebook import (
     FacebookCallbackView, FacebookPagesSessionView, FacebookConnectionView, FacebookPostView,
     FacebookWebhookView, MarketingDripTestView,
 )
+from api.v1.views.tiktok import (
+    TikTokCallbackView, TikTokSessionView, TikTokConnectionView, TikTokCreatorInfoView,
+    TikTokPostView,
+)
 from api.v1.views.analytics import CommandCenterViewSet, ShopInsightsView
 from api.v1.views.telemetry import (
     ActivityLogViewSet, AnalyticsEventViewSet, ErrorEventViewSet,
@@ -40,7 +44,11 @@ from api.v1.views.telemetry import (
 from api.v1.views.users import (
     AddressViewSet, StaffUserViewSet, SubscriptionViewSet, WishlistViewSet,
 )
-from api.v1.views.ai import AIAssistantView, AIProductExtractionView, AIProductListExtractionView
+from api.v1.views.ai import (
+    AIAssistantView, AIProductExtractionView, AIProductListExtractionView,
+    AIPublicAssistantView, AIMarketplaceAssistantView, AISearchParseView,
+    AIGenerateCopyView,
+)
 from api.v1.views.portal import PortalOrderListView, PortalReceiptListView
 from api.v1.views.identity import ResolveIdentityView
 from api.v1.views.uploads import MediaUploadView
@@ -144,6 +152,28 @@ urlpatterns = [
         FacebookWebhookView.as_view(),
         name='facebook-webhook',
     ),
+    # TikTok OAuth + posting (same shape as the Facebook block above).
+    path('social/tiktok/callback', TikTokCallbackView.as_view(), name='tiktok-callback'),
+    path(
+        'social/tiktok/sessions/<str:session_id>',
+        TikTokSessionView.as_view(),
+        name='tiktok-session',
+    ),
+    path(
+        'social/tiktok/connections',
+        TikTokConnectionView.as_view(),
+        name='tiktok-connections',
+    ),
+    path(
+        'social/tiktok/creator-info',
+        TikTokCreatorInfoView.as_view(),
+        name='tiktok-creator-info',
+    ),
+    path(
+        'social/tiktok/posts',
+        TikTokPostView.as_view(),
+        name='tiktok-posts',
+    ),
     # Peak-hours marketing drip (legacy Cloud Function testMarketingDrip).
     path(
         'social/marketing/test-drip',
@@ -162,6 +192,13 @@ urlpatterns = [
     path('ai/extract-product/', AIProductExtractionView.as_view(), name='ai-extract-product'),
     # One photo -> many distinct products, queued into the Add Product form.
     path('ai/extract-products/', AIProductListExtractionView.as_view(), name='ai-extract-products'),
+    # Anonymous storefront/marketplace/search endpoints (were browser-side
+    # OpenRouter calls with the bundled VITE_OPENROUTER_API_KEY).
+    path('ai/public-assistant/', AIPublicAssistantView.as_view(), name='ai-public-assistant'),
+    path('ai/marketplace-assistant/', AIMarketplaceAssistantView.as_view(), name='ai-marketplace-assistant'),
+    path('ai/parse-search/', AISearchParseView.as_view(), name='ai-parse-search'),
+    # Authenticated marketing-copy generator for the share/ad dialogs.
+    path('ai/generate-copy/', AIGenerateCopyView.as_view(), name='ai-generate-copy'),
     # Identity resolution across CRM rows (legacy Cloud Function resolveIdentity).
     path('identity/resolve/', ResolveIdentityView.as_view(), name='identity-resolve'),
     # Product/shop image uploads (legacy Firebase Storage in src/lib/imageUtils.ts).

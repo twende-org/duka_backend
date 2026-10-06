@@ -13,6 +13,7 @@ class SocialIntegrationSerializer(serializers.ModelSerializer):
     isConnected = serializers.BooleanField(source='is_connected', read_only=True)
     connectedBy = serializers.CharField(source='connected_by', read_only=True)
     syncStatus = serializers.CharField(source='sync_status', read_only=True)
+    tokenExpiresAt = serializers.DateTimeField(source='token_expires_at', read_only=True)
     lastSyncAt = serializers.DateTimeField(source='last_sync_at', read_only=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
     updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
@@ -22,7 +23,7 @@ class SocialIntegrationSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = (
             'id', 'created_at', 'updated_at', 'is_connected', 'access_token',
-            'refresh_token', 'last_sync_at', 'sync_status',
+            'refresh_token', 'token_expires_at', 'last_sync_at', 'sync_status',
         )
         extra_kwargs = {'shop': {'required': False}}
         # ``shopId`` and the auto-generated ``shop`` field share a source, which
@@ -87,6 +88,7 @@ class SocialLogSerializer(serializers.ModelSerializer):
     productIds = serializers.ListField(source='product_ids', read_only=True)
     facebookPostId = serializers.CharField(source='facebook_post_id', read_only=True)
     instagramPostId = serializers.CharField(source='instagram_post_id', read_only=True)
+    tiktokPublishId = serializers.CharField(source='tiktok_publish_id', read_only=True)
     videoFallbackReason = serializers.CharField(source='video_fallback_reason', read_only=True)
     instagramError = serializers.CharField(source='instagram_error', read_only=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
@@ -97,5 +99,6 @@ class SocialLogSerializer(serializers.ModelSerializer):
         # needed and the shop is addressed by the query filter, not the payload.
         fields = (
             'id', 'type', 'action', 'status', 'facebookPostId', 'instagramPostId',
-            'error', 'productIds', 'videoFallbackReason', 'instagramError', 'createdAt',
+            'tiktokPublishId', 'error', 'productIds', 'videoFallbackReason',
+            'instagramError', 'createdAt',
         )

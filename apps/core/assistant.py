@@ -1,14 +1,18 @@
-"""Server-side OpenRouter calls for the two browser-side AI helpers.
+"""Server-side OpenRouter calls for the browser-side AI helpers.
 
 ``src/lib/ai.ts`` called OpenRouter straight from the bundle with
 ``VITE_OPENROUTER_API_KEY``: ``askBusinessAssistant`` backs the floating
 dashboard copilot and ``extractProductDetailsFromImage`` backs the product
-camera scan. Both prompts and request shapes are ported verbatim so answers
-stay the same; only the transport moved server-side, which keeps the key out
-of the frontend.
+camera scan. The storefront widgets (``src/lib/public-ai.ts``,
+``src/lib/marketplace-ai.ts``), the directory search parser
+(``src/lib/services/aiRecommendationService.ts``) and the three marketing
+copy dialogs did the same. All prompts and request shapes are ported
+verbatim so answers stay the same; only the transport moved server-side,
+which keeps the key out of the frontend.
 """
 import json
 import logging
+import re
 
 import requests
 from django.conf import settings
@@ -21,9 +25,21 @@ OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 #: to the same live model the invoice intake uses.
 CHAT_MODEL = 'google/gemini-2.5-flash-lite'
 VISION_MODEL = 'google/gemini-2.5-flash'
+#: The storefront widgets used gemini-2.5-pro; keep them on it so moving the
+#: transport server-side changes neither answer quality nor cost.
+PUBLIC_CHAT_MODEL = 'google/gemini-2.5-pro'
 CHAT_TIMEOUT = 20
 VISION_TIMEOUT = 30
+#: The pro model is slower, especially the 4000-token marketplace concierge.
+PUBLIC_CHAT_TIMEOUT = 30
+MARKETPLACE_TIMEOUT = 45
 MAX_TOKENS = 1000
+MARKETPLACE_MAX_TOKENS = 4000
+#: The search-intent parser answered in <=150 tokens by design.
+SEARCH_MAX_TOKENS = 150
+#: Safety caps on the anonymous marketplace conversation history.
+MAX_HISTORY_MESSAGES = 20
+MAX_MESSAGE_CHARS = 2000
 
 #: The legacy helper fell back to this when the model answered nothing.
 FALLBACK_REPLY = 'Samahani, sijaelewa. Tafadhali rudia.'
@@ -120,7 +136,7 @@ Extract these fields if visible:
 - category: The product category or type (e.g., 'Beverages', 'Cooking oil', 'Toiletries') (string)
 - buyingPrice: The wholesale/buying price if visible (number, no currency symbol)
 - sellingPrice: The retail/selling price if visible (number, no currency symbol)
-- quantity: The number of items in the pack or visible in the stack (number)
+- quantity: The number of items in the pack or visible in the stack — an integer, digits only, no unit words (number)
 - size: The pack or serving size written on the packaging (e.g., '500ml', '1kg') (string)
 - weight: The net weight if printed (e.g., '250g') (string)
 - color: The product colour when it matters for identification (string)
@@ -141,7 +157,7 @@ Extract these fields for each product if visible:
 - category: The product category or type (e.g., 'Beverages', 'Cooking oil', 'Toiletries') (string)
 - buyingPrice: The wholesale/buying price if visible (number, no currency symbol)
 - sellingPrice: The retail/selling price if visible (number, no currency symbol)
-- quantity: The number of items in the pack or visible in the stack (number)
+- quantity: The number of items in the pack or visible in the stack — an integer, digits only, no unit words (number)
 - size: The pack or serving size written on the packaging (e.g., '500ml', '1kg') (string)
 - weight: The net weight if printed (e.g., '250g') (string)
 - color: The product colour when it matters for identification (string)
@@ -248,17 +264,23 @@ def _strip_json_fences(content):
 def _clean_number(value):
     """Coerce a model answer into a non-negative float, else ``None``.
 
-    Accepts real numbers and comma-formatted strings like ``"3,500"``; other
-    strings, bools and negatives are rejected.
+    Accepts real numbers, comma-formatted strings like ``"3,500"``, and
+    strings that merely START with a number, like ``"6 pcs"`` or
+    ``"TSh 3,500"`` — the first numeric token wins. Bools and negatives are
+    rejected. Models routinely answer quantity with the unit attached; without
+    this, the value would be dropped (numeric keys never fall through to
+    ``extra``) and the field would silently stay empty in the review table.
     """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         number = float(value)
     elif isinstance(value, str):
-        cleaned = value.strip().replace(',', '')
+        match = re.search(r'\d[\d,]*(?:\.\d+)?', value)
+        if not match:
+            return None
         try:
-            number = float(cleaned)
+            number = float(match.group(0).replace(',', ''))
         except ValueError:
             return None
     else:
@@ -374,3 +396,197 @@ def extract_product_list(image, category_hints=None):
         if len(products) >= MAX_PRODUCTS_PER_PHOTO:
             break
     return products
+
+
+PUBLIC_ASSISTANT_PROMPT = """You are a friendly, helpful Virtual Shop Assistant for a store named "{shop_name}".
+You speak fluent English and Swahili (respond in the language the user speaks).
+
+==================================================
+CORE IDENTITY & PRIORITIES
+==================================================
+You are a public-facing customer service and sales agent. You do not manage the business; you help shoppers buy things.
+Your priorities: 1. Be polite and helpful 2. Help customers find products 3. Encourage them to add items to their cart or contact the shop via WhatsApp 4. Never reveal business secrets.
+
+==================================================
+STRICT OPERATING RULES
+==================================================
+1) ONLY PUBLIC DATA: Use the public context data provided below to answer questions about products, prices, and availability.
+2) NEVER REVEAL SECRETS: Never talk about profit, wholesale costs, supplier names, or exact inventory numbers (just say "It is in stock").
+3) NO HALLUCINATION: If the shop doesn't sell a product the user asks for, say: "Samahani, hatuna bidhaa hiyo kwa sasa" (Sorry, we don't have that currently). Do not invent products.
+4) DRIVE SALES: When a user finds a product they like, encourage them to "Add to Cart" or click the WhatsApp button to finalize the order.
+5) NO PAYMENT PROCESSING: Never ask the user for credit card numbers, passwords, or M-Pesa PINs in the chat.
+
+==================================================
+AUTO-NAVIGATION (PRODUCT DISCOVERY)
+==================================================
+If you recommend a specific product to the customer, you MUST provide a direct link to it so they can view it.
+To navigate them to a product, include this exact tag anywhere in your response: [NAVIGATE:?productId=ID]
+Replace ID with the actual product ID from the context data.
+
+Example:
+User: "I am looking for a cheap laptop"
+AI: "We have the Lenovo Thinkpad for TZS 400,000! [NAVIGATE:?productId=123]"
+
+==================================================
+CURRENT PUBLIC CONTEXT DATA
+==================================================
+{context_json}"""
+
+MARKETPLACE_PROMPT = """You are a helpful and persuasive Marketplace Concierge for a SaaS business platform called "{platform_name}".
+You speak fluent English and Swahili (respond in the language the user speaks).
+
+==================================================
+CORE IDENTITY & PRIORITIES
+==================================================
+You are a global search assistant for the Twende Duka marketplace directory. Your goal is to help shoppers find the right store to buy from, based on location or categories.
+Your priorities: 1. Be polite and helpful 2. Recommend relevant shops from the context data 3. Guide the user directly to those shops.
+
+==================================================
+STRICT OPERATING RULES
+==================================================
+1) ONLY CONTEXT DATA: You can only recommend shops that exist in the context data provided below. Do not invent shops.
+2) NO SPECIFIC PRODUCTS: You only know what categories a shop sells (e.g. "Electronics", "Clothing"), you do not know their specific inventory items or prices. Tell the user to visit the shop to see specific products.
+3) DRIVE TRAFFIC: Always encourage the user to visit the recommended shop's storefront.
+
+==================================================
+SHOP RECOMMENDATION & NAVIGATION
+==================================================
+When a user asks for a shop, you must first recommend it and ASK the user if they would like you to navigate them to the shop's page.
+ONLY IF the user explicitly agrees or says "yes" to visiting the shop, you should then include this exact tag anywhere in your response: [NAVIGATE:/shop/SLUG]
+Replace SLUG with the EXACT slug value from the shop's "slug" field in the context data below.
+CRITICAL: NEVER use a placeholder like "SLUG" or "shop-name". NEVER output [NAVIGATE:/shop/] with an empty or invented slug. ONLY use real slugs from the context data.
+DO NOT use the [NAVIGATE:/shop/SLUG] tag in your first recommendation. Wait for the user's confirmation.
+
+Example (using real slug from context):
+User: "Where can I find phones in Arusha?"
+AI: "I recommend checking out Tech Store! They are located in Arusha and sell Electronics. Would you like me to take you to their storefront?"
+User: "Yes please!"
+AI: "Great! Navigating you to Tech Store now. [NAVIGATE:/shop/tech-store]"
+
+==================================================
+CURRENT PUBLIC MARKETPLACE DATA (TOP 50 SHOPS)
+==================================================
+{context_json}"""
+
+SEARCH_PARSE_PROMPT = """You are a commerce search intent analyzer for a Tanzanian marketplace. You extract structured filter criteria from a user's natural language search query in either English or Swahili.
+Respond ONLY with a JSON object with the following structure, with NO markdown formatting, NO backticks, and NO additional text:
+{
+  "cleanQuery": "the core search terms translated into BOTH English and Swahili, separated by a space (so it matches products named in either language)",
+  "category": "product category if specified (e.g. phones, electronics, shoes)",
+  "brand": "brand name if specified",
+  "maxPrice": numeric maximum price in TZS if specified,
+  "minPrice": numeric minimum price in TZS if specified
+}
+
+Example 1: "I want to buy a samsung phone under 500,000 tzs"
+{"cleanQuery": "phone simu", "category": "phones", "brand": "samsung", "maxPrice": 500000}
+
+Example 2: "natafuta viatu vya kukimbilia chini ya elfu 50"
+{"cleanQuery": "viatu vya kukimbilia running shoes", "category": "shoes", "maxPrice": 50000}
+"""
+
+
+def ask_public_assistant(shop_name, user_message, context_data):
+    """Reply text for the anonymous storefront widget (legacy ``askPublicAssistant``)."""
+    data = _post({
+        'model': PUBLIC_CHAT_MODEL,
+        'max_tokens': MAX_TOKENS,
+        'messages': [
+            {'role': 'system', 'content': PUBLIC_ASSISTANT_PROMPT.format(
+                shop_name=shop_name,
+                context_json=json.dumps(context_data, indent=2, ensure_ascii=False),
+            )},
+            {'role': 'user', 'content': user_message},
+        ],
+    }, timeout=PUBLIC_CHAT_TIMEOUT)
+    return _first_content(data, FALLBACK_REPLY)
+
+
+def _normalize_history(messages):
+    """Widget history as OpenRouter messages: ``ai`` -> ``assistant``, capped."""
+    normalized = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get('role')
+        content = message.get('content')
+        if role not in ('user', 'assistant', 'ai', 'system') or not isinstance(content, str):
+            continue
+        normalized.append({
+            'role': 'assistant' if role == 'ai' else role,
+            'content': content[:MAX_MESSAGE_CHARS],
+        })
+        if len(normalized) >= MAX_HISTORY_MESSAGES:
+            break
+    return normalized
+
+
+def ask_marketplace_assistant(messages, context_data):
+    """Reply text for the anonymous marketplace concierge (multi-turn, legacy
+    ``askMarketplaceAssistant``). ``context_data['platformName']`` names the
+    platform in the system prompt, the rest is inlined as the shop directory.
+    """
+    history = _normalize_history(messages)
+    if not history:
+        raise AssistantError('messages must contain at least one valid message.')
+    platform_name = context_data.get('platformName') or 'Twende Duka'
+    data = _post({
+        'model': PUBLIC_CHAT_MODEL,
+        'max_tokens': MARKETPLACE_MAX_TOKENS,
+        'messages': [
+            {'role': 'system', 'content': MARKETPLACE_PROMPT.format(
+                platform_name=platform_name,
+                context_json=json.dumps(context_data, indent=2, ensure_ascii=False),
+            )},
+            *history,
+        ],
+    }, timeout=MARKETPLACE_TIMEOUT)
+    return _first_content(data, FALLBACK_REPLY)
+
+
+def parse_search_query(query):
+    """Structured filters parsed out of a natural-language directory search.
+
+    Raises :class:`AssistantError` (also when the key is missing, 503) so the
+    caller can fall back to its local basic parser exactly like the browser
+    helper, which treated any failure the same way.
+    """
+    data = _post({
+        'model': CHAT_MODEL,
+        'max_tokens': SEARCH_MAX_TOKENS,
+        'messages': [
+            {'role': 'system', 'content': SEARCH_PARSE_PROMPT},
+            {'role': 'user', 'content': query},
+        ],
+        'temperature': 0.1,
+    }, timeout=CHAT_TIMEOUT)
+    content = _strip_json_fences(_first_content(data, '')).strip()
+    try:
+        parsed = json.loads(content)
+    except ValueError as exc:
+        raise AssistantError(f'Search parsing returned unparsable JSON: {exc}') from exc
+    if not isinstance(parsed, dict):
+        raise AssistantError('Search parsing returned a non-object payload.')
+    return {
+        'cleanQuery': parsed.get('cleanQuery') if isinstance(parsed.get('cleanQuery'), str) else query,
+        'category': parsed.get('category') if isinstance(parsed.get('category'), str) else None,
+        'brand': parsed.get('brand') if isinstance(parsed.get('brand'), str) else None,
+        'maxPrice': _clean_number(parsed.get('maxPrice')),
+        'minPrice': _clean_number(parsed.get('minPrice')),
+    }
+
+
+def generate_copy(prompt):
+    """Raw completion text for a single marketing-copy prompt.
+
+    The three dialogs (ad generator, feed caption, sold-out caption) build
+    their own prompts and strip/parse the answer locally, so this stays a
+    plain single-message call without a system prompt.
+    """
+    data = _post({
+        'model': CHAT_MODEL,
+        'max_tokens': MAX_TOKENS,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'temperature': 0.7,
+    }, timeout=CHAT_TIMEOUT)
+    return _first_content(data, '')

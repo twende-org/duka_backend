@@ -259,6 +259,17 @@ FACEBOOK_WEBHOOK_VERIFY_SIGNATURE = os.environ.get(
     'FACEBOOK_WEBHOOK_VERIFY_SIGNATURE', 'true'
 ).strip().lower() not in ('false', '0', 'no')
 
+# TikTok Login (social domain)
+# Credentials of the TikTok app used by the frontend dialog. The redirect URI
+# must be registered on that app; the default points at the local Django dev
+# server so a fresh checkout can complete the handshake before any deploy.
+TIKTOK_CLIENT_KEY = os.environ.get('TIKTOK_CLIENT_KEY', '')
+TIKTOK_CLIENT_SECRET = os.environ.get('TIKTOK_CLIENT_SECRET', '')
+TIKTOK_REDIRECT_URI = os.environ.get(
+    'TIKTOK_REDIRECT_URI',
+    'http://127.0.0.1:8009/api/v1/social/tiktok/callback',
+)
+
 # Passphrase for the crypto-js token envelope (apps.core.crypto). ENCRYPTION_KEY
 # is the variable the Cloud Functions used; SOCIAL_TOKEN_ENCRYPTION_KEY lets the
 # Django side rotate independently later.
@@ -359,6 +370,13 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_PAGINATION_CLASS': 'apps.core.pagination.StandardPagination',
     'PAGE_SIZE': 50,
+    'DEFAULT_THROTTLE_RATES': {
+        # Anonymous AI endpoints (storefront/marketplace/search-parse) and the
+        # authenticated copy generator. Rates table only — throttles apply
+        # solely where a view sets throttle_classes.
+        'ai_anon': '30/minute',
+        'ai_copy': '30/minute',
+    },
 }
 
 # Spectacular Settings

@@ -54,6 +54,9 @@ class SocialIntegration(CoreModel):
     # Use set_access_token()/get_access_token() — never assign plaintext.
     access_token = models.CharField(max_length=1000, blank=True, null=True)
     refresh_token = models.CharField(max_length=1000, blank=True, null=True)
+    # TikTok access tokens live ~24h, so the posting path refreshes against
+    # this deadline instead of assuming a long-lived token like Meta's.
+    token_expires_at = models.DateTimeField(blank=True, null=True)
     last_sync_at = models.DateTimeField(blank=True, null=True)
     sync_status = models.CharField(
         max_length=20, choices=SYNC_STATUS_CHOICES, default='idle'
@@ -147,6 +150,7 @@ class SocialLog(CoreModel):
     product_ids = models.JSONField(default=list, blank=True)
     facebook_post_id = models.CharField(max_length=255, blank=True, null=True)
     instagram_post_id = models.CharField(max_length=255, blank=True, null=True)
+    tiktok_publish_id = models.CharField(max_length=255, blank=True, null=True)
     error = models.TextField(blank=True, null=True)
     video_fallback_reason = models.TextField(blank=True, null=True)
     instagram_error = models.TextField(blank=True, null=True)

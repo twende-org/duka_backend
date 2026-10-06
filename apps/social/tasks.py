@@ -63,6 +63,72 @@ def post_product_to_facebook(shop_id, product_ids, post_format='feed', include_i
         return {'success': False, 'error': str(exc)}
 
 
+TIKTOK_STATUS_POLL_INTERVAL_SECONDS = 60
+TIKTOK_STATUS_POLL_MAX_ATTEMPTS = 15  # ~15 minutes of SEND_TO_USER_INBOX retries.
+TIKTOK_STATUS_PUBLISHED = 'PUBLISH_COMPLETE'
+TIKTOK_STATUS_FAILED = 'FAILED'
+
+
+@shared_task(name='apps.social.tasks.poll_tiktok_publish_status')
+def poll_tiktok_publish_status(social_log_id, attempt=0):
+    """Resolve a TikTok ``publish_id`` to its final status (Content Sharing
+    Guidelines: apps must track post status, not fire-and-forget).
+
+    ``SEND_TO_USER_INBOX`` reschedules itself until the attempt ceiling; a
+    terminal status (or the ceiling, or a vanished integration) writes the
+    outcome onto the ``social_logs`` row the publish call recorded.
+    """
+    # pyrefly: ignore [missing-import]
+    from apps.social import tiktok as tiktok_api
+    # pyrefly: ignore [missing-import]
+    from apps.social.models import SocialLog
+
+    log = SocialLog.objects.filter(pk=social_log_id).first()
+    if log is None or not log.tiktok_publish_id:
+        return {'success': False, 'error': 'log-missing'}
+    integration = SocialIntegration.objects.filter(
+        shop=log.shop, platform='tiktok', is_connected=True,
+    ).first()
+    if integration is None:
+        return {'success': False, 'error': 'tiktok-not-connected'}
+
+    try:
+        access_token = tiktok_api.ensure_fresh_access_token(integration)
+        entries = tiktok_api.fetch_publish_status(access_token, [log.tiktok_publish_id])
+    except tiktok_api.TikTokApiError as exc:
+        if attempt < TIKTOK_STATUS_POLL_MAX_ATTEMPTS:
+            poll_tiktok_publish_status.apply_async(
+                args=[social_log_id, attempt + 1],
+                countdown=TIKTOK_STATUS_POLL_INTERVAL_SECONDS,
+            )
+            return {'success': False, 'error': str(exc), 'retrying': True}
+        log.status = 'failure'
+        log.error = f'TikTok status polling gave up: {exc}'
+        log.save(update_fields=['status', 'error'])
+        return {'success': False, 'error': str(exc)}
+
+    entry = entries[0] if entries else {}
+    status = entry.get('status') or ''
+    if status == TIKTOK_STATUS_PUBLISHED:
+        log.status = 'success'
+        log.error = ''
+        log.save(update_fields=['status', 'error'])
+        return {'success': True, 'publishId': log.tiktok_publish_id}
+    if status == TIKTOK_STATUS_FAILED:
+        reason = entry.get('failReason') or 'TikTok rejected the video.'
+        log.status = 'failure'
+        log.error = reason
+        log.save(update_fields=['status', 'error'])
+        return {'success': False, 'error': reason}
+    if attempt < TIKTOK_STATUS_POLL_MAX_ATTEMPTS:
+        poll_tiktok_publish_status.apply_async(
+            args=[social_log_id, attempt + 1],
+            countdown=TIKTOK_STATUS_POLL_INTERVAL_SECONDS,
+        )
+        return {'success': False, 'status': status or 'unknown', 'retrying': True}
+    return {'success': False, 'status': status or 'unknown', 'retrying': False}
+
+
 @shared_task(name='apps.social.tasks.daily_social_poster')
 def daily_social_poster():
     """One reel per connected shop, rotating through the in-stock catalog."""

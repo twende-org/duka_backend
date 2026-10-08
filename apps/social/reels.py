@@ -74,9 +74,11 @@ FILTER_COMPLEX_SLIDESHOW = (
 )
 
 # Single image: the input is a *looped* stream (many frames of the same still),
-# so zoompan's per-input-frame model does not apply. crop expressions are
-# evaluated per frame, giving a deterministic 10-second Ken Burns cycle keyed
-# off t without any cross-frame state.
+# so zoompan runs at d=1, emitting one output frame per input frame, and the
+# Ken Burns cycle keys off `in` (the global input frame counter): a
+# deterministic 10 s zoom (1.0 -> 1.1249) with a 36 px rightward pan. The old
+# approach animated a crop's w/h with t, but crop fixes w/h at graph init, so
+# it failed to configure on modern ffmpeg.
 FILTER_COMPLEX_SINGLE = (
     'fps=30,split=2[reel_bg][reel_fg];'
     '[reel_bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,'
@@ -84,8 +86,10 @@ FILTER_COMPLEX_SINGLE = (
     '[reel_fg]'
     'scale=1296:1728:force_original_aspect_ratio=decrease:flags=lanczos,'
     'format=rgba,pad=1296:1728:(ow-iw)/2:(oh-ih)/2:color=black@0,'
-    "crop=w='iw/(1+0.125*mod(t,10)/10)':h='ih/(1+0.125*mod(t,10)/10)'"
-    ":x='(iw-ow)/2+36*mod(t,10)/10':y='(ih-oh)/2',"
+    "zoompan=z='min(1.1249,1.0+0.125*mod(in,300)/300)'"
+    ":d=1:x='iw/2-(iw/zoom/2)+36*mod(in,300)/300':y='ih/2-(ih/zoom/2)'"
+    ':s=1296x1728:fps=30,'
+    'format=rgba,'
     'scale=972:1152:force_original_aspect_ratio=decrease:flags=lanczos[reel_sharp];'
     '[reel_blurred][reel_sharp]overlay=(W-w)/2:(H-h)/2,format=yuv420p'
 )

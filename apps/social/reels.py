@@ -53,6 +53,10 @@ KB_ZOOM_CAP = 1.1249
 SAFE_ZONE_WIDTH = 972
 SAFE_ZONE_HEIGHT = 1152
 
+# Both compositions blur the background at 1/10 scale (boxblur=2:2 on ~108x192,
+# bilinear upscale): visually the same as a radius-20 blur at full resolution,
+# at a fraction of the CPU.
+#
 # Slideshow: the image2 sequence demuxer delivers exactly one input frame per
 # still at 1/4fps, so zoompan's d=120 emits 120 frames (4s @ 30fps) per still
 # and `in` increments once per still — mod(in, 2) alternates zoom-in / zoom-out.
@@ -61,8 +65,8 @@ SAFE_ZONE_HEIGHT = 1152
 FILTER_COMPLEX_SLIDESHOW = (
     'split=2[reel_bg][reel_fg];'
     '[reel_bg]fps=30,'
-    'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,'
-    'crop=1080:1920,boxblur=20:20[reel_blurred];'
+    'scale=108:192:force_original_aspect_ratio=increase,'
+    'crop=108:192,boxblur=2:2,scale=1080:1920:flags=bilinear[reel_blurred];'
     '[reel_fg]'
     'scale=1296:1728:force_original_aspect_ratio=decrease:flags=lanczos,'
     'format=rgba,pad=1296:1728:(ow-iw)/2:(oh-ih)/2:color=black@0,'
@@ -81,8 +85,8 @@ FILTER_COMPLEX_SLIDESHOW = (
 # it failed to configure on modern ffmpeg.
 FILTER_COMPLEX_SINGLE = (
     'fps=30,split=2[reel_bg][reel_fg];'
-    '[reel_bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,'
-    'crop=1080:1920,boxblur=20:20[reel_blurred];'
+    '[reel_bg]scale=108:192:force_original_aspect_ratio=increase,'
+    'crop=108:192,boxblur=2:2,scale=1080:1920:flags=bilinear[reel_blurred];'
     '[reel_fg]'
     'scale=1296:1728:force_original_aspect_ratio=decrease:flags=lanczos,'
     'format=rgba,pad=1296:1728:(ow-iw)/2:(oh-ih)/2:color=black@0,'
@@ -96,7 +100,7 @@ FILTER_COMPLEX_SINGLE = (
 
 VIDEO_FLAGS = [
     '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.0',
-    '-crf', '20', '-preset', 'medium', '-tune', 'stillimage',
+    '-crf', '20', '-preset', 'veryfast', '-tune', 'stillimage',
     '-r', '30', '-pix_fmt', 'yuv420p',
     '-b:v', '4M', '-maxrate', '6M', '-bufsize', '10M',
     '-movflags', '+faststart',
@@ -107,7 +111,7 @@ AUDIO_SAMPLE_RATE_FLAGS = ['-ar', '44100']
 # Tokens that must survive in every emitted ffmpeg argv for the render to be
 # Meta cross-compatible; checked by the static gate before any encode.
 REQUIRED_VIDEO_TOKENS = ('libx264', 'high', '-crf', 'yuv420p', '1080:1920',
-                         'boxblur=20:20', 'fps=30', 'faststart')
+                         'boxblur=2:2', 'fps=30', 'faststart', 'veryfast')
 REQUIRED_AUDIO_TOKENS = ('aac', '44100')
 
 # Curated royalty-free tracks, picked at random so posts do not all sound alike.

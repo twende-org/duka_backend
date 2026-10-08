@@ -18,6 +18,7 @@ Tests patch ``apps.social.tiktok.requests.post`` / ``.request`` the same way
 the Facebook suite patches ``apps.social.services.requests.get``.
 """
 import json
+import logging
 import secrets
 from datetime import timedelta
 from urllib.parse import urlencode
@@ -36,6 +37,8 @@ from apps.shops.models import Shop
 from apps.shops.permissions import MANAGEMENT_ROLES, assert_shop_access
 # pyrefly: ignore [missing-import]
 from apps.social.models import FacebookOAuthSession, SocialIntegration
+
+logger = logging.getLogger(__name__)
 
 TIKTOK_API_BASE = 'https://open.tiktokapis.com/v2'
 DEFAULT_PRIVACY_LEVEL = 'PUBLIC_TO_EVERYONE'
@@ -120,17 +123,18 @@ def exchange_code_for_token(code, code_verifier=''):
     }
     if code_verifier:
         form['code_verifier'] = code_verifier
-    payload = _post_form('oauth/token', form)
+    payload = _post_form('oauth/token/', form)
     _raise_for_error(payload, 'Token exchange failed')
     data = payload.get('data') or {}
     access_token = data.get('access_token')
     if not access_token:
+        logger.error('[TikTok] token response: %s', payload)
         raise TikTokApiError('No access token in TikTok response.')
     return data
 
 
 def refresh_access_token(refresh_token):
-    payload = _post_form('oauth/token', {
+    payload = _post_form('oauth/token/', {
         'client_key': getattr(settings, 'TIKTOK_CLIENT_KEY', ''),
         'client_secret': getattr(settings, 'TIKTOK_CLIENT_SECRET', ''),
         'grant_type': 'refresh_token',
@@ -146,7 +150,7 @@ def refresh_access_token(refresh_token):
 
 def fetch_tiktok_user(access_token):
     payload = _request_json(
-        'GET', 'user/info', access_token,
+        'GET', 'user/info/', access_token,
         params={'fields': ','.join(USER_INFO_FIELDS)},
     )
     _raise_for_error(payload, 'User info failed')

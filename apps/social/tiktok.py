@@ -131,6 +131,9 @@ def exchange_code_for_token(code, code_verifier=''):
     payload = _post_form('oauth/token/', form)
     _raise_for_error(payload, 'Token exchange failed')
     data = payload.get('data') or {}
+    if 'access_token' not in data and payload.get('access_token'):
+        # The token endpoint returns its fields top-level, without a data envelope.
+        data = payload
     access_token = data.get('access_token')
     if not access_token:
         logger.error('[TikTok] token response: %s', payload)
@@ -147,6 +150,8 @@ def refresh_access_token(refresh_token):
     })
     _raise_for_error(payload, 'Token refresh failed')
     data = payload.get('data') or {}
+    if 'access_token' not in data and payload.get('access_token'):
+        data = payload
     access_token = data.get('access_token')
     if not access_token:
         raise TikTokApiError('No access token in TikTok refresh response.')

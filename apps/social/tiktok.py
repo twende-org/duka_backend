@@ -120,7 +120,7 @@ def exchange_code_for_token(code, code_verifier=''):
     }
     if code_verifier:
         form['code_verifier'] = code_verifier
-    payload = _post_form('oauth/token/', form)
+    payload = _post_form('oauth/token', form)
     _raise_for_error(payload, 'Token exchange failed')
     data = payload.get('data') or {}
     access_token = data.get('access_token')
@@ -130,7 +130,7 @@ def exchange_code_for_token(code, code_verifier=''):
 
 
 def refresh_access_token(refresh_token):
-    payload = _post_form('oauth/token/', {
+    payload = _post_form('oauth/token', {
         'client_key': getattr(settings, 'TIKTOK_CLIENT_KEY', ''),
         'client_secret': getattr(settings, 'TIKTOK_CLIENT_SECRET', ''),
         'grant_type': 'refresh_token',
@@ -146,7 +146,7 @@ def refresh_access_token(refresh_token):
 
 def fetch_tiktok_user(access_token):
     payload = _request_json(
-        'GET', 'user/info/', access_token,
+        'GET', 'user/info', access_token,
         params={'fields': ','.join(USER_INFO_FIELDS)},
     )
     _raise_for_error(payload, 'User info failed')

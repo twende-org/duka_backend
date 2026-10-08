@@ -53,7 +53,9 @@ TOKEN_EXPIRY_SKEW = timedelta(minutes=5)
 SESSION_EXPIRED_MESSAGE = 'Session expired or invalid. Please reconnect.'
 # Scopes the app registration asks for: basic profile + video upload/publish.
 SCOPES = ('user.info.basic', 'video.upload', 'video.publish')
-USER_INFO_FIELDS = ('open_id', 'username', 'display_name', 'avatar_url')
+# 'username' needs a profile scope beyond user.info.basic; asking for it
+# makes TikTok 401 the whole user/info call with scope_not_authorized.
+USER_INFO_FIELDS = ('open_id', 'display_name', 'avatar_url')
 
 TOKEN_TIMEOUT = 20
 

@@ -73,10 +73,15 @@ def tiktok_api_url(path):
 def _raise_for_error(payload, context):
     """TikTok answers 200 with an ``error`` envelope; ``code == 'ok'`` is success."""
     error = payload.get('error') if isinstance(payload, dict) else None
-    code = error.get('code') if isinstance(error, dict) else None
-    if code in (None, 'ok'):
+    if not error:
         return
-    message = (error or {}).get('message') or 'Unknown TikTok error.'
+    if isinstance(error, str):
+        # RFC 6749 shape from the OAuth token endpoint: error + error_description.
+        description = payload.get('error_description') or error
+        raise TikTokApiError(f'{context}: {description}')
+    if error.get('code', 'ok') == 'ok':
+        return
+    message = error.get('message') or 'Unknown TikTok error.'
     raise TikTokApiError(f'{context}: {message}')
 
 

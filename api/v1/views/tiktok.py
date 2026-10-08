@@ -68,10 +68,10 @@ class TikTokCallbackView(APIView):
             tokens = tiktok.exchange_code_for_token(code, parsed['code_verifier'])
             user = tiktok.fetch_tiktok_user(tokens['access_token'])
             session_id = tiktok.create_tiktok_session(shop_id, tokens, user)
-        except tiktok.TikTokApiError:
+        except tiktok.TikTokApiError as exc:
             logger.exception('TikTok OAuth callback failed')
             return HttpResponse(
-                'TikTok authentication failed', status=500, content_type='text/plain'
+                f'TikTok authentication failed: {exc}', status=400, content_type='text/plain',
             )
         query = urlencode({'tt_session_id': session_id, 'shopId': shop_id})
         return HttpResponseRedirect(f'{parsed["origin"]}{parsed["return_path"]}?{query}')

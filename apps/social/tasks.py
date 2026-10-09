@@ -2,9 +2,11 @@
 
 - ``post_product_to_facebook``: the ``autoPostProductOnCreate`` /
   ``autoPostProductOnUpdate`` Firestore triggers, and the manual post button.
-- ``daily_social_poster``: the ``dailySocialScheduler`` cron (10:00 EAT).
+- ``post_product_to_tiktok``: background TikTok posting (manual or scheduled).
+- ``daily_social_poster``: the ``dailySocialScheduler`` cron (10:00 EAT),
+  posts to both Facebook and TikTok when connected.
 - ``peak_hours_marketing_drip``: the ``peakHoursMarketingDrip`` cron
-  (07:30 / 12:30 / 19:30 EAT), one reel per opt-in shop.
+  (07:30 / 12:30 / 19:30 EAT), one reel per opt-in shop to both platforms.
 """
 import logging
 from datetime import datetime
@@ -20,7 +22,7 @@ from apps.shops.models import Shop
 # pyrefly: ignore [missing-import]
 from apps.social.models import SocialIntegration
 # pyrefly: ignore [missing-import]
-from apps.social.posting import SocialPostError, perform_facebook_post
+from apps.social.posting import SocialPostError, perform_facebook_post, perform_tiktok_post
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,18 @@ def post_product_to_facebook(shop_id, product_ids, post_format='feed', include_i
         return perform_facebook_post(shop_id, product_ids, None, include_image, post_format)
     except SocialPostError as exc:
         logger.warning('Background Facebook post failed (shop %s): %s', shop_id, exc)
+        return {'success': False, 'error': str(exc)}
+
+
+@shared_task(name='apps.social.tasks.post_product_to_tiktok')
+def post_product_to_tiktok(shop_id, product_ids, message=None, post_options=None):
+    """Publish to TikTok in the background; failures are recorded, never raised."""
+    if isinstance(product_ids, str):
+        product_ids = [product_ids]
+    try:
+        return perform_tiktok_post(shop_id, product_ids, message, post_options=post_options)
+    except SocialPostError as exc:
+        logger.warning('Background TikTok post failed (shop %s): %s', shop_id, exc)
         return {'success': False, 'error': str(exc)}
 
 
@@ -134,7 +148,6 @@ def daily_social_poster():
     """One reel per connected shop, rotating through the in-stock catalog."""
     results = []
     shops = Shop.objects.filter(
-        social_integrations__platform='facebook',
         social_integrations__is_connected=True,
     ).distinct()
     for shop in shops:
@@ -143,14 +156,32 @@ def daily_social_poster():
             logger.info('No in-stock product with images for shop %s.', shop.pk)
             continue
         product_ref = str(product.legacy_id or product.pk)
-        try:
-            result = perform_facebook_post(shop.pk, [product_ref], None, True, 'reel')
-        except SocialPostError as exc:
-            logger.warning('Scheduled post failed for shop %s: %s', shop.pk, exc)
-            results.append({'shopId': str(shop.pk), 'productId': product_ref, 'success': False, 'error': str(exc)})
-            continue
-        Product.objects.filter(pk=product.pk).update(last_posted_at=timezone.now())
-        results.append({'shopId': str(shop.pk), 'productId': product_ref, 'success': True, **result})
+        
+        has_facebook = SocialIntegration.objects.filter(
+            shop=shop, platform='facebook', is_connected=True,
+        ).exists()
+        has_tiktok = SocialIntegration.objects.filter(
+            shop=shop, platform='tiktok', is_connected=True,
+        ).exists()
+        
+        if has_facebook:
+            try:
+                result = perform_facebook_post(shop.pk, [product_ref], None, True, 'reel')
+                Product.objects.filter(pk=product.pk).update(last_posted_at=timezone.now())
+                results.append({'shopId': str(shop.pk), 'productId': product_ref, 'platform': 'facebook', 'success': True, **result})
+            except SocialPostError as exc:
+                logger.warning('Scheduled Facebook post failed for shop %s: %s', shop.pk, exc)
+                results.append({'shopId': str(shop.pk), 'productId': product_ref, 'platform': 'facebook', 'success': False, 'error': str(exc)})
+        
+        if has_tiktok:
+            try:
+                result = perform_tiktok_post(shop.pk, [product_ref], None)
+                Product.objects.filter(pk=product.pk).update(last_posted_at=timezone.now())
+                results.append({'shopId': str(shop.pk), 'productId': product_ref, 'platform': 'tiktok', 'success': True, **result})
+            except SocialPostError as exc:
+                logger.warning('Scheduled TikTok post failed for shop %s: %s', shop.pk, exc)
+                results.append({'shopId': str(shop.pk), 'productId': product_ref, 'platform': 'tiktok', 'success': False, 'error': str(exc)})
+    
     return results
 
 
@@ -170,21 +201,48 @@ def marketing_drip_for_shop(shop):
     ai_marketing_config = shop.ai_marketing_settings or {}
     if ai_marketing_config.get('enabled') is not True:
         return None
-    # Legacy only checked that a facebook integration document existed, so a shop
-    # with a revoked token was retried forever; require the connection to be live.
-    if not SocialIntegration.objects.filter(
-        shop=shop, platform='facebook', is_connected=True,
-    ).exists():
-        return None
+    
     product = next_marketing_product(shop)
     if product is None:
         return None
     product_ref = str(product.legacy_id or product.pk)
-    result = perform_facebook_post(
-        shop.pk, [product_ref], None, True, 'reel', ai_marketing_config,
-    )
+    results = []
+    
+    has_facebook = SocialIntegration.objects.filter(
+        shop=shop, platform='facebook', is_connected=True,
+    ).exists()
+    has_tiktok = SocialIntegration.objects.filter(
+        shop=shop, platform='tiktok', is_connected=True,
+    ).exists()
+    
+    if not (has_facebook or has_tiktok):
+        return None
+    
+    if has_facebook:
+        try:
+            result = perform_facebook_post(
+                shop.pk, [product_ref], None, True, 'reel', ai_marketing_config,
+            )
+            results.append({'platform': 'facebook', **result})
+        except SocialPostError as exc:
+            logger.warning('Marketing drip Facebook post failed for shop %s: %s', shop.pk, exc)
+            results.append({'platform': 'facebook', 'success': False, 'error': str(exc)})
+    
+    if has_tiktok:
+        try:
+            result = perform_tiktok_post(
+                shop.pk, [product_ref], None, ai_marketing_config=ai_marketing_config,
+            )
+            results.append({'platform': 'tiktok', **result})
+        except SocialPostError as exc:
+            logger.warning('Marketing drip TikTok post failed for shop %s: %s', shop.pk, exc)
+            results.append({'platform': 'tiktok', 'success': False, 'error': str(exc)})
+    
+    if not results:
+        return None
+    
     Product.objects.filter(pk=product.pk).update(last_posted_at=timezone.now())
-    return {'shopId': str(shop.pk), 'productId': product_ref, 'success': True, **result}
+    return {'shopId': str(shop.pk), 'productId': product_ref, 'success': True, 'results': results}
 
 
 def run_marketing_drip(shop_ids=None):

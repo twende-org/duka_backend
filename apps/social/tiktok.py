@@ -369,31 +369,32 @@ def initialize_video_post(
 
 def initialize_photo_post(
     access_token, title, image_urls, privacy_level=None,
-    disable_comment=False, disable_duet=False, disable_stitch=False,
-    brand_content=False, brand_organic=False,
+    disable_comment=False, brand_content=False, brand_organic=False,
+    **_kwargs,
 ):
     """Create a photo post with up to 35 images; returns the ``publish_id``.
 
-    TikTok's photo posting API accepts multiple image URLs and creates a
-    carousel post. The same privacy/interaction rules apply as video posts.
+    TikTok's photo endpoint is ``post/publish/content/init/`` (not the video
+    ``post/publish/video/init/``). Photo posts do not support ``disable_duet``
+    or ``disable_stitch`` — those are silently ignored via ``**_kwargs`` so
+    the caller can forward the same option blob as video.
     """
     if privacy_level and privacy_level not in ALLOWED_PRIVACY_LEVELS:
         raise TikTokApiError(f'Unsupported privacy_level: {privacy_level}')
     if not image_urls or len(image_urls) > 35:
         raise TikTokApiError('Photo post requires 1-35 images.')
-    payload = _request_json('POST', 'post/publish/photo/init/', access_token, body={
+    payload = _request_json('POST', 'post/publish/content/init/', access_token, body={
         'post_info': {
             'title': (title or '')[:TIKTOK_TITLE_MAX_LENGTH],
             'privacy_level': privacy_level or DEFAULT_PRIVACY_LEVEL,
-            'disable_duet': bool(disable_duet),
             'disable_comment': bool(disable_comment),
-            'disable_stitch': bool(disable_stitch),
             'brand_content_toggle': bool(brand_content),
             'brand_organic_toggle': bool(brand_organic),
         },
         'source_info': {
             'source': 'PULL_FROM_URL',
-            'image_urls': image_urls,
+            'photo_images': image_urls,
+            'photo_cover_index': 1,
         },
         'post_mode': 'DIRECT_POST',
         'media_type': 'PHOTO',

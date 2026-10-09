@@ -23,9 +23,7 @@ from apps.core.legacy import resolve_legacy_pk
 # pyrefly: ignore [missing-import]
 from apps.core.utils import first_param
 # pyrefly: ignore [missing-import]
-from apps.social import services, tiktok
-# pyrefly: ignore [missing-import]
-from apps.social.tasks import post_product_to_tiktok
+from apps.social import posting, services, tiktok
 # pyrefly: ignore [missing-import]
 from apps.shops.models import Shop
 # pyrefly: ignore [missing-import]
@@ -190,16 +188,30 @@ class TikTokPostView(APIView):
             return Response({'detail': 'Shop not found.'}, status=status.HTTP_404_NOT_FOUND)
         assert_shop_access(request.user, shop.id, roles=MANAGEMENT_ROLES)
 
-        # Queue the reel render + upload as a Celery task so the HTTP request
-        # returns immediately; ffmpeg on the VPS takes minutes and the old
-        # synchronous path timed out before the video finished rendering.
-        task = post_product_to_tiktok.delay(
-            shop.pk,
-            [str(product_id)],
-            first_param(data, 'message'),
-            post_options=post_options or None,
-        )
-        return Response({'queued': True, 'taskId': task.id}, status=status.HTTP_202_ACCEPTED)
+        post_format = first_param(data, 'postFormat', 'post_format') or 'reel'
+        if post_format not in ('reel', 'photo'):
+            return Response(
+                {'detail': 'postFormat must be "reel" or "photo".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = posting.perform_tiktok_post(
+                shop.pk,
+                [str(product_id)],
+                first_param(data, 'message'),
+                post_format=post_format,
+                post_options=post_options or None,
+            )
+        except posting.TikTokNotConnected as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except (posting.TikTokVideoTooLong, posting.TikTokPrivacyUnavailable) as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except posting.ProductNotFound as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except posting.SocialPostFailed as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result)
 
     @staticmethod
     def _parse_post_options(data):

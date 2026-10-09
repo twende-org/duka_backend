@@ -706,20 +706,10 @@ def perform_tiktok_post(
     # the creator cannot edit — the caption ships exactly as written above.
 
     image_urls = _collect_image_urls(products)
-    video_url = None
-    try:
-        if not getattr(settings, 'REEL_PUBLIC_BASE_URL', ''):
-            raise ReelGenerationError(
-                'Environment config missing mandatory REEL_PUBLIC_BASE_URL parameter map'
-            )
-        if not image_urls:
-            raise ReelGenerationError('No usable product images to build the TikTok video.')
-        logger.info('Generating TikTok video for shop %s.', shop.pk)
-        video_url = generate_reel_from_images(image_urls, None)
-    except ReelGenerationError as exc:
-        logger.error('TikTok video generation failed: %s', exc)
-        _record_log(shop, product_ids, status='failure', error=str(exc))
-        raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc
+    if not image_urls:
+        detail = 'No usable product images for the TikTok post.'
+        _record_log(shop, product_ids, status='failure', error=detail)
+        raise SocialPostFailed(detail)
 
     try:
         access_token = tiktok_api.ensure_fresh_access_token(integration)
@@ -743,21 +733,39 @@ def perform_tiktok_post(
             )
             _record_log(shop, product_ids, status='failure', error=detail)
             raise TikTokPrivacyUnavailable(detail)
-        max_seconds = creator_info.get('maxVideoPostDurationSec') or 0
-        if max_seconds:
-            expected = reels.estimate_reel_duration_seconds(len(image_urls))
-            if expected > max_seconds:
-                detail = (
-                    f'Video would be about {expected}s but this TikTok account '
-                    f'allows at most {max_seconds}s. Use fewer product photos and try again.'
-                )
-                _record_log(shop, product_ids, status='failure', error=detail)
-                raise TikTokVideoTooLong(detail)
+        if post_format != 'photo':
+            max_seconds = creator_info.get('maxVideoPostDurationSec') or 0
+            if max_seconds:
+                expected = reels.estimate_reel_duration_seconds(len(image_urls))
+                if expected > max_seconds:
+                    detail = (
+                        f'Video would be about {expected}s but this TikTok account '
+                        f'allows at most {max_seconds}s. Use fewer product photos and try again.'
+                    )
+                    _record_log(shop, product_ids, status='failure', error=detail)
+                    raise TikTokVideoTooLong(detail)
 
     try:
-        publish_id = tiktok_api.initialize_video_post(
-            access_token, post_message, video_url, **(post_options or {}),
-        )
+        if post_format == 'photo':
+            publish_id = tiktok_api.initialize_photo_post(
+                access_token, post_message, image_urls, **(post_options or {}),
+            )
+        else:
+            video_url = None
+            try:
+                if not getattr(settings, 'REEL_PUBLIC_BASE_URL', ''):
+                    raise ReelGenerationError(
+                        'Environment config missing mandatory REEL_PUBLIC_BASE_URL parameter map'
+                    )
+                logger.info('Generating TikTok video for shop %s.', shop.pk)
+                video_url = generate_reel_from_images(image_urls, None)
+            except ReelGenerationError as exc:
+                logger.error('TikTok video generation failed: %s', exc)
+                _record_log(shop, product_ids, status='failure', error=str(exc))
+                raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc
+            publish_id = tiktok_api.initialize_video_post(
+                access_token, post_message, video_url, **(post_options or {}),
+            )
     except tiktok_api.TikTokApiError as exc:
         _record_log(shop, product_ids, status='failure', error=str(exc))
         raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc

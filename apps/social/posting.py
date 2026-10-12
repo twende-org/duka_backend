@@ -14,16 +14,23 @@ Execution contracts that must not drift:
   ``ProductNotFound`` before any Graph call and ``SocialPostFailed`` after a
   recorded failure; Instagram failures never fail the post (legacy).
 """
+import io
 import json
 import logging
+import os
 import re
 import time
+import uuid
 from datetime import timezone as dt_timezone
 from decimal import Decimal
+from urllib.parse import urljoin
 
 import requests
 from django.conf import settings
+from django.core.files import File
+from django.core.files.storage import default_storage
 from django.utils import timezone
+from PIL import Image
 
 # pyrefly: ignore [missing-import]
 from apps.core.crypto import decrypt_token
@@ -362,6 +369,50 @@ def _collect_image_urls(products):
             urls = product.image_urls if isinstance(product.image_urls, list) else []
             raw.append(product.image_url or (urls[0] if urls else None))
     return [url for url in raw if isinstance(url, str) and url.startswith('http')]
+
+
+TIKTOK_PHOTO_DIRECTORY = 'tiktok_photos'
+TIKTOK_IMAGE_DOWNLOAD_TIMEOUT = 30
+
+
+def _ensure_jpeg_for_tiktok(image_urls):
+    """Download images and convert non-JPEG/PNG to JPEG for TikTok.
+
+    TikTok's ``PULL_FROM_URL`` photo endpoint rejects images served with
+    wrong MIME types (e.g. ``application/octet-stream`` for .webp) and may
+    not support all formats. Converting to JPEG guarantees compatibility.
+    Returns a new list of publicly accessible JPEG URLs.
+    """
+    base_url = str(getattr(settings, 'REEL_PUBLIC_BASE_URL', '') or '').rstrip('/')
+    if not base_url:
+        logger.warning('REEL_PUBLIC_BASE_URL not set; cannot convert images for TikTok.')
+        return image_urls
+
+    converted = []
+    for url in image_urls:
+        lower = url.lower()
+        if lower.endswith(('.jpg', '.jpeg', '.png')):
+            converted.append(url)
+            continue
+        try:
+            logger.info('Converting %s to JPEG for TikTok.', url)
+            response = requests.get(url, timeout=TIKTOK_IMAGE_DOWNLOAD_TIMEOUT)
+            response.raise_for_status()
+            image = Image.open(io.BytesIO(response.content))
+            if image.mode in ('RGBA', 'P', 'LA'):
+                image = image.convert('RGB')
+            buffer = io.BytesIO()
+            image.save(buffer, format='JPEG', quality=90)
+            buffer.seek(0)
+            filename = f'{TIKTOK_PHOTO_DIRECTORY}/{uuid.uuid4().hex}.jpg'
+            stored_name = default_storage.save(filename, File(buffer))
+            public_url = urljoin(f'{base_url}/', default_storage.url(stored_name).lstrip('/'))
+            logger.info('Converted image saved as %s', public_url)
+            converted.append(public_url)
+        except Exception as exc:
+            logger.error('Failed to convert image %s: %s', url, exc)
+            converted.append(url)
+    return converted
 
 
 def _append_contact_details(message, shop, post_format):
@@ -747,6 +798,7 @@ def perform_tiktok_post(
 
     try:
         if post_format == 'photo':
+            image_urls = _ensure_jpeg_for_tiktok(image_urls)
             publish_id = tiktok_api.initialize_photo_post(
                 access_token, post_message, image_urls, **(post_options or {}),
             )

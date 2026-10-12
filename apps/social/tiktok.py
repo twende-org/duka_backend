@@ -394,7 +394,7 @@ def initialize_photo_post(
         'source_info': {
             'source': 'PULL_FROM_URL',
             'photo_images': image_urls,
-            'photo_cover_index': 1,
+            'photo_cover_index': 0,
         },
         'post_mode': 'DIRECT_POST',
         'media_type': 'PHOTO',

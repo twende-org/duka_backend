@@ -108,6 +108,11 @@ def _request_json(method, path, access_token, body=None, params=None):
             method, tiktok_api_url(path), json=body, params=params,
             headers=headers, timeout=TOKEN_TIMEOUT,
         )
+        if response.status_code >= 400:
+            logger.error(
+                '[TikTok] %s %s → %s: %s',
+                method, path, response.status_code, response.text[:2000],
+            )
         response.raise_for_status()
         payload = response.json()
     except requests.RequestException as exc:
@@ -399,7 +404,6 @@ def initialize_photo_post(
         'post_mode': 'DIRECT_POST',
         'media_type': 'PHOTO',
     })
-    logger.error('TikTok photo init response: %s', json.dumps(payload, indent=2))
     _raise_for_error(payload, 'Photo init failed')
     publish_id = (payload.get('data') or {}).get('publish_id')
     if not publish_id:

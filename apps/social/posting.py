@@ -799,9 +799,22 @@ def perform_tiktok_post(
     try:
         if post_format == 'photo':
             image_urls = _ensure_jpeg_for_tiktok(image_urls)
-            publish_id = tiktok_api.initialize_photo_post(
-                access_token, post_message, image_urls, **(post_options or {}),
-            )
+            try:
+                publish_id = tiktok_api.initialize_photo_post(
+                    access_token, post_message, image_urls, **(post_options or {}),
+                )
+            except tiktok_api.TikTokApiError as exc:
+                if 'unaudited_client' in str(exc) or 'private_accounts' in str(exc):
+                    logger.warning(
+                        'TikTok app is unaudited; retrying photo post with SELF_ONLY privacy.',
+                    )
+                    retry_options = dict(post_options or {})
+                    retry_options['privacy_level'] = 'SELF_ONLY'
+                    publish_id = tiktok_api.initialize_photo_post(
+                        access_token, post_message, image_urls, **retry_options,
+                    )
+                else:
+                    raise
         else:
             video_url = None
             try:
@@ -815,9 +828,22 @@ def perform_tiktok_post(
                 logger.error('TikTok video generation failed: %s', exc)
                 _record_log(shop, product_ids, status='failure', error=str(exc))
                 raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc
-            publish_id = tiktok_api.initialize_video_post(
-                access_token, post_message, video_url, **(post_options or {}),
-            )
+            try:
+                publish_id = tiktok_api.initialize_video_post(
+                    access_token, post_message, video_url, **(post_options or {}),
+                )
+            except tiktok_api.TikTokApiError as exc:
+                if 'unaudited_client' in str(exc) or 'private_accounts' in str(exc):
+                    logger.warning(
+                        'TikTok app is unaudited; retrying video post with SELF_ONLY privacy.',
+                    )
+                    retry_options = dict(post_options or {})
+                    retry_options['privacy_level'] = 'SELF_ONLY'
+                    publish_id = tiktok_api.initialize_video_post(
+                        access_token, post_message, video_url, **retry_options,
+                    )
+                else:
+                    raise
     except tiktok_api.TikTokApiError as exc:
         _record_log(shop, product_ids, status='failure', error=str(exc))
         raise SocialPostFailed(f'TikTok posting failed: {exc}') from exc

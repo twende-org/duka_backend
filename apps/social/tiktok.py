@@ -388,11 +388,13 @@ def initialize_photo_post(
         raise TikTokApiError(f'Unsupported privacy_level: {privacy_level}')
     if not image_urls or len(image_urls) > 35:
         raise TikTokApiError('Photo post requires 1-35 images.')
-    payload = _request_json('POST', 'post/publish/content/init/', access_token, body={
+    body = {
         'post_info': {
             'title': (title or '')[:TIKTOK_TITLE_MAX_LENGTH],
             'privacy_level': privacy_level or DEFAULT_PRIVACY_LEVEL,
             'disable_comment': bool(disable_comment),
+            'brand_content_toggle': bool(brand_content),
+            'brand_organic_toggle': bool(brand_organic),
         },
         'source_info': {
             'source': 'PULL_FROM_URL',
@@ -401,7 +403,9 @@ def initialize_photo_post(
         },
         'post_mode': 'DIRECT_POST',
         'media_type': 'PHOTO',
-    })
+    }
+    logger.error('[TikTok] OUTGOING photo payload: %s', json.dumps(body, indent=2))
+    payload = _request_json('POST', 'post/publish/content/init/', access_token, body=body)
     _raise_for_error(payload, 'Photo init failed')
     publish_id = (payload.get('data') or {}).get('publish_id')
     if not publish_id:

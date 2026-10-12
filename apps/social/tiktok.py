@@ -393,8 +393,6 @@ def initialize_photo_post(
             'title': (title or '')[:TIKTOK_TITLE_MAX_LENGTH],
             'privacy_level': privacy_level or DEFAULT_PRIVACY_LEVEL,
             'disable_comment': bool(disable_comment),
-            'brand_content_toggle': bool(brand_content),
-            'brand_organic_toggle': bool(brand_organic),
         },
         'source_info': {
             'source': 'PULL_FROM_URL',

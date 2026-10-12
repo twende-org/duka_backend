@@ -390,7 +390,7 @@ def initialize_photo_post(
         raise TikTokApiError('Photo post requires 1-35 images.')
     body = {
         'post_info': {
-            'title': (title or '')[:TIKTOK_TITLE_MAX_LENGTH],
+            'description': (title or '')[:4000],
             'privacy_level': privacy_level or DEFAULT_PRIVACY_LEVEL,
             'disable_comment': bool(disable_comment),
         },

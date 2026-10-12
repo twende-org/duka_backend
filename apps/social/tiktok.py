@@ -404,7 +404,7 @@ def initialize_photo_post(
         'post_mode': 'DIRECT_POST',
         'media_type': 'PHOTO',
     }
-    logger.error('[TikTok] OUTGOING photo payload: %s', json.dumps(body, indent=2))
+    logger.error('[TikTok] OUTGOING photo payload: %s', json.dumps(body))
     payload = _request_json('POST', 'post/publish/content/init/', access_token, body=body)
     _raise_for_error(payload, 'Photo init failed')
     publish_id = (payload.get('data') or {}).get('publish_id')

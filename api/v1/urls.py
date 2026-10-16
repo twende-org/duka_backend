@@ -30,7 +30,7 @@ from api.v1.views.social import (
 )
 from api.v1.views.facebook import (
     FacebookCallbackView, FacebookPagesSessionView, FacebookConnectionView, FacebookPostView,
-    FacebookWebhookView, MarketingDripTestView,
+    FacebookWebhookView, MarketingDripTestView, FacebookPageInsightsView, InstagramInsightsView,
 )
 from api.v1.views.tiktok import (
     TikTokCallbackView, TikTokSessionView, TikTokConnectionView, TikTokCreatorInfoView,
@@ -145,6 +145,16 @@ urlpatterns = [
         'social/facebook/posts',
         FacebookPostView.as_view(),
         name='facebook-posts',
+    ),
+    path(
+        'social/facebook/insights',
+        FacebookPageInsightsView.as_view(),
+        name='facebook-insights',
+    ),
+    path(
+        'social/instagram/insights',
+        InstagramInsightsView.as_view(),
+        name='instagram-insights',
     ),
     # Facebook -> Django webhook (legacy Cloud Function facebookWebhook).
     path(

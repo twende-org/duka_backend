@@ -185,6 +185,114 @@ def _fetch_instagram_id(page_id, page_token):
     return account.get('id') or None
 
 
+def fetch_page_insights(page_id, page_token):
+    """Fetch Page Insights metrics from the Graph API.
+
+    Uses the ``read_insights`` permission to pull reach, engagement, and
+    follower data for the connected page. Returns a dict with the most
+    useful metrics for the merchant dashboard.
+    """
+    if not page_id or not page_token:
+        raise FacebookGraphError('Page ID and token are required.')
+
+    metrics = [
+        'page_impressions',
+        'page_engaged_users',
+        'page_fans',
+        'page_post_engagements',
+        'page_negative_feedback',
+        'page_views_total',
+    ]
+
+    payload = _graph_get(f'{page_id}/insights', {
+        'metric': ','.join(metrics),
+        'period': 'day',
+        'access_token': page_token,
+    })
+
+    data = payload.get('data') or []
+    result = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = item.get('name')
+        values = item.get('values') or []
+        if values and isinstance(values, list):
+            result[name] = values[-1].get('value', 0)
+
+    return {
+        'impressions': result.get('page_impressions', 0),
+        'engagedUsers': result.get('page_engaged_users', 0),
+        'followers': result.get('page_fans', 0),
+        'postEngagements': result.get('page_post_engagements', 0),
+        'negativeFeedback': result.get('page_negative_feedback', 0),
+        'pageViews': result.get('page_views_total', 0),
+    }
+
+
+def fetch_instagram_profile(ig_user_id, page_token):
+    """Fetch Instagram Business profile via the Graph API.
+
+    Uses ``instagram_basic`` to read the connected Instagram account's
+    username, follower count, and media count.
+    """
+    if not ig_user_id or not page_token:
+        raise FacebookGraphError('Instagram user ID and token are required.')
+
+    payload = _graph_get(str(ig_user_id), {
+        'fields': 'username,name,follower_count,media_count,profile_picture_url',
+        'access_token': page_token,
+    })
+
+    return {
+        'username': payload.get('username', ''),
+        'name': payload.get('name', ''),
+        'followers': payload.get('follower_count', 0),
+        'mediaCount': payload.get('media_count', 0),
+        'profilePictureUrl': payload.get('profile_picture_url', ''),
+    }
+
+
+def fetch_instagram_insights(ig_user_id, page_token):
+    """Fetch Instagram Insights metrics from the Graph API.
+
+    Uses ``instagram_manage_insights`` to pull impressions, reach, and
+    engagement data. Falls back to zeros if the permission is not granted.
+    """
+    if not ig_user_id or not page_token:
+        raise FacebookGraphError('Instagram user ID and token are required.')
+
+    metrics = ['impressions', 'reach', 'engagement']
+    try:
+        payload = _graph_get(f'{ig_user_id}/insights', {
+            'metric': ','.join(metrics),
+            'period': 'day',
+            'access_token': page_token,
+        })
+    except FacebookGraphError:
+        return {
+            'impressions': 0,
+            'reach': 0,
+            'engagement': 0,
+        }
+
+    data = payload.get('data') or []
+    result = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = item.get('name')
+        values = item.get('values') or []
+        if values and isinstance(values, list):
+            result[name] = values[-1].get('value', 0)
+
+    return {
+        'impressions': result.get('impressions', 0),
+        'reach': result.get('reach', 0),
+        'engagement': result.get('engagement', 0),
+    }
+
+
 def save_page_connection(user, shop_ref, page_id, session_id):
     """Attach the picked page to the shop, mirroring saveFacebookConnection."""
     shop_pk = resolve_legacy_pk(Shop, shop_ref)

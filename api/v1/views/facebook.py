@@ -135,6 +135,139 @@ class FacebookPostView(APIView):
         return Response(result)
 
 
+class FacebookPageInsightsView(APIView):
+    """GET /api/v1/social/facebook/insights?shopId=...
+
+    Fetches Facebook Page Insights (reach, engagement, followers) for the
+    shop's connected page. Requires ``read_insights`` permission.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        shop_id = first_param(request.query_params, 'shopId', 'shop_id')
+        if not shop_id:
+            return Response(
+                {'detail': 'shopId is missing.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        shop_pk = resolve_legacy_pk(Shop, str(shop_id))
+        shop = Shop.objects.filter(pk=shop_pk).first() if shop_pk else None
+        if shop is None:
+            return Response({'detail': 'Shop not found.'}, status=status.HTTP_404_NOT_FOUND)
+        assert_shop_access(request.user, shop.id, roles=MANAGEMENT_ROLES)
+
+        from apps.social.models import SocialIntegration
+        integration = SocialIntegration.objects.filter(
+            shop=shop, platform='facebook', is_connected=True
+        ).first()
+        if not integration or not integration.page_id:
+            return Response(
+                {'detail': 'Facebook page is not connected.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            page_token = integration.get_access_token()
+            insights = services.fetch_page_insights(integration.page_id, page_token)
+        except services.FacebookGraphError:
+            insights = {
+                'impressions': 0,
+                'engagedUsers': 0,
+                'followers': 0,
+                'postEngagements': 0,
+                'negativeFeedback': 0,
+                'pageViews': 0,
+            }
+
+        return Response({
+            'pageId': integration.page_id,
+            'pageName': integration.page_name,
+            **insights,
+        })
+
+
+class InstagramInsightsView(APIView):
+    """GET /api/v1/social/instagram/insights?shopId=...
+
+    Fetches Instagram Business profile and insights for the shop's connected
+    Facebook page's linked Instagram account. Requires ``instagram_basic``
+    and optionally ``instagram_manage_insights``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        shop_id = first_param(request.query_params, 'shopId', 'shop_id')
+        if not shop_id:
+            return Response(
+                {'detail': 'shopId is missing.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        shop_pk = resolve_legacy_pk(Shop, str(shop_id))
+        shop = Shop.objects.filter(pk=shop_pk).first() if shop_pk else None
+        if shop is None:
+            return Response({'detail': 'Shop not found.'}, status=status.HTTP_404_NOT_FOUND)
+        assert_shop_access(request.user, shop.id, roles=MANAGEMENT_ROLES)
+
+        from apps.social.models import SocialIntegration
+        integration = SocialIntegration.objects.filter(
+            shop=shop, platform='facebook', is_connected=True
+        ).first()
+        if not integration or not integration.page_id:
+            return Response(
+                {'detail': 'Facebook page is not connected.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            page_token = integration.get_access_token()
+        except services.FacebookGraphError:
+            return Response(
+                {'detail': 'Unable to retrieve access token.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        ig_user_id = integration.instagram_id
+        if not ig_user_id:
+            ig_user_id = services._fetch_instagram_id(integration.page_id, page_token)
+
+        if not ig_user_id:
+            return Response({
+                'connected': False,
+                'instagramId': None,
+                'username': None,
+                'name': None,
+                'followers': 0,
+                'mediaCount': 0,
+                'impressions': 0,
+                'reach': 0,
+                'engagement': 0,
+            })
+
+        try:
+            profile = services.fetch_instagram_profile(ig_user_id, page_token)
+        except services.FacebookGraphError:
+            profile = {
+                'username': '',
+                'name': '',
+                'followers': 0,
+                'mediaCount': 0,
+                'profilePictureUrl': '',
+            }
+
+        insights = services.fetch_instagram_insights(ig_user_id, page_token)
+
+        return Response({
+            'connected': True,
+            'instagramId': ig_user_id,
+            **profile,
+            **insights,
+        })
+
+
 class FacebookWebhookView(APIView):
     """GET/POST /api/v1/social/facebook/webhook
 

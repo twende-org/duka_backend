@@ -2,6 +2,7 @@ from django.conf import settings
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import path, include, re_path
+from django.views.generic import RedirectView
 from django.views.decorators.cache import cache_control
 from django.views.decorators.http import require_GET
 from django.views.static import serve as serve_files
@@ -22,6 +23,10 @@ from apps.users.views import (
 )
 
 urlpatterns = [
+    # The service has no public landing page; the API and admin live under
+    # /api/ and /admin/.
+    path('', RedirectView.as_view(url='/admin/', permanent=False)),
+
     path('admin/', admin.site.urls),
 
     # Liveness/readiness probe for load balancers, Traefik and the container

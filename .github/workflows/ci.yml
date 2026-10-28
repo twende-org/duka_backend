@@ -98,5 +98,16 @@ jobs:
             docker compose up -d
             docker compose ps
 
-            docker compose exec -T api python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/healthz/',timeout=10).read().decode())"
+            # gunicorn needs a few seconds to bind; probe every replica.
+            ok=0
+            for attempt in $(seq 1 30); do
+              ok=1
+              for cid in $(docker compose ps -q api); do
+                docker exec "$cid" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=5)" >/dev/null 2>&1 || ok=0
+              done
+              [ "$ok" = "1" ] && echo "all api replicas healthy" && break
+              sleep 3
+            done
+            [ "$ok" = "1" ]
+
             docker image prune -f

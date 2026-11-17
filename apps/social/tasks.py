@@ -40,7 +40,9 @@ def _has_images(product):
 def next_product_for_shop(shop):
     """Product to post next: in stock, has images, posted longest ago."""
     rows = (
-        Inventory.objects.filter(product__shop=shop, quantity__gt=0)
+        # ``product__is_active``: a product the merchant deleted stops feeding
+        # the auto-poster, even while its stock rows still exist.
+        Inventory.objects.filter(product__shop=shop, product__is_active=True, quantity__gt=0)
         .select_related('product')
         .order_by('product_id')[:SCHEDULER_BATCH]
     )
@@ -188,7 +190,8 @@ def daily_social_poster():
 def next_marketing_product(shop):
     """Product the drip should post: publishToFacebook, has images, posted longest ago."""
     products = list(
-        Product.objects.filter(shop=shop, publish_to_facebook=True).order_by('pk')[:MARKETING_BATCH]
+        Product.objects.filter(shop=shop, is_active=True, publish_to_facebook=True)
+        .order_by('pk')[:MARKETING_BATCH]
     )
     candidates = [product for product in products if _has_images(product)]
     if not candidates:

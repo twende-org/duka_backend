@@ -7,6 +7,7 @@ from api.v1.views.public import (
 from api.v1.views.products import (
     ProductViewSet, CategoryViewSet, MerchantCategoryViewSet,
     InventoryViewSet, InventoryMovementViewSet, StockTransferViewSet,
+    MasterProductSearchView,
 )
 from api.v1.views.transfers import B2BStockTransferViewSet
 from api.v1.views.sales import SalesViewSet, OrderViewSet
@@ -125,6 +126,10 @@ urlpatterns = [
     # from the search_query/search_submitted telemetry stream.
     path('public/products/search/', PublicProductSearchView.as_view(), name='public-product-search'),
     path('public/trending-searches/', PublicTrendingSearchesView.as_view(), name='public-trending-searches'),
+    # Shared master catalog picker (Phase 1 tap-to-add). Standalone path, not a
+    # router resource: the ranked selector returns a list, which a ViewSet's
+    # detail route cannot look up.
+    path('master-products/', MasterProductSearchView.as_view(), name='master-product-search'),
     # Customer portal: cross-shop, caller-scoped reads (not router resources).
     path('portal/orders/', PortalOrderListView.as_view(), name='portal-orders'),
     path('portal/receipts/', PortalReceiptListView.as_view(), name='portal-receipts'),

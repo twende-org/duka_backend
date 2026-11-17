@@ -422,7 +422,10 @@ def apply_intake_batch(batch, user):
                 category, _ = Category.objects.get_or_create(
                     shop=batch.shop, name__iexact=draft.category_name.strip()[:255],
                     defaults={'name': draft.category_name.strip()[:255]})
-            product = Product.objects.filter(shop=batch.shop, name__iexact=name).first()
+            # ``is_active``: a product deleted since the AI read the receipt
+            # applies as a new row, not as a silent restock of a hidden one.
+            product = Product.objects.filter(
+                shop=batch.shop, name__iexact=name, is_active=True).first()
             if product is None:
                 product = Product.objects.create(
                     shop=batch.shop,

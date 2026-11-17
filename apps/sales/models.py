@@ -22,6 +22,9 @@ class Sale(CoreModel):
     SALE_STATUS = (
         ('completed', 'Completed'),
         ('draft', 'Draft'),
+        # A reversed sale: stock and any IMEI units went back, the money did not
+        # get re-collected. ``void_sale`` is the only writer.
+        ('voided', 'Voided'),
     )
 
     legacy_id = models.CharField(max_length=64, blank=True, null=True, unique=True, db_index=True)
@@ -55,6 +58,12 @@ class SaleItem(CoreModel):
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
     profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    #: Snapshot of the IMEI numbers sold on this line, newest truth first in the
+    #: order the cashier scanned them. ``InventorySerialItem`` rows are the live
+    #: register (they move back to ``in_stock`` when a sale is voided), so a
+    #: receipt that must keep printing the exact device the buyer walked out with
+    #: reads this column instead — the same reason ``product_name`` is snapshotted.
+    imei_numbers = models.JSONField(default=list, blank=True, null=True)
 
 class DailySalesSummary(CoreModel):
     """

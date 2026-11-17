@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from apps.products.models import Product, Category, MerchantCategory, Inventory, InventoryMovement, StockTransfer
+from apps.products.models import (
+    Product, Category, MerchantCategory, Inventory, InventoryMovement, StockTransfer,
+    MasterProduct, InventorySerialItem,
+)
 from apps.shops.models import Shop, Branch
 from apps.core.legacy import LegacyPrimaryKeyRelatedField, app_id
 from django.contrib.auth import get_user_model
@@ -132,6 +135,11 @@ class ProductSerializer(serializers.ModelSerializer):
     publishToDeliveryApp = serializers.BooleanField(source='publish_to_delivery_app', required=False)
     sourceProductId = serializers.CharField(source='source_product_id', required=False, allow_blank=True, allow_null=True)
     supplierShopId = serializers.CharField(source='supplier_shop_id', required=False, allow_blank=True, allow_null=True)
+    # Catalog link is written by the tap-to-add service only. Read-only here so a
+    # generic product PATCH — which any shop role can send — cannot repoint or
+    # unpoint a shop row behind the catalogue's back.
+    masterProduct = LegacyPrimaryKeyRelatedField(source='master_product', read_only=True)
+    requiresImei = serializers.BooleanField(source='requires_imei', required=False)
     legacyId = serializers.CharField(source='legacy_id', read_only=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
     updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
@@ -140,7 +148,7 @@ class ProductSerializer(serializers.ModelSerializer):
         model = Product
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at')
-        extra_kwargs = {'shop': {'required': False}}
+        extra_kwargs = {'shop': {'required': False}, 'master_product': {'read_only': True}}
 
     def get_category(self, obj):
         return obj.category.name if obj.category else None
@@ -172,7 +180,8 @@ class ProductBulkImportSerializer(serializers.Serializer):
 class InventorySerializer(serializers.ModelSerializer):
     # camelCase aliases accept the frontend payload and mirror it back in responses;
     # snake_case keys stay writable/readable for internal callers (lossless parity).
-    productId = LegacyPrimaryKeyRelatedField(source='product', queryset=Product.objects.all())
+    productId = LegacyPrimaryKeyRelatedField(
+        source='product', queryset=Product.objects.filter(is_active=True))
     branchId = LegacyPrimaryKeyRelatedField(source='branch', queryset=Branch.objects.all())
     # The app keys stock rows by shop + product; the row itself only links to a branch.
     shopId = serializers.SerializerMethodField()
@@ -195,7 +204,8 @@ class InventorySerializer(serializers.ModelSerializer):
 
 
 class InventoryMovementSerializer(serializers.ModelSerializer):
-    productId = LegacyPrimaryKeyRelatedField(source='product', queryset=Product.objects.all())
+    productId = LegacyPrimaryKeyRelatedField(
+        source='product', queryset=Product.objects.filter(is_active=True))
     productName = serializers.CharField(source='product.name', read_only=True)
     branchId = LegacyPrimaryKeyRelatedField(source='branch', queryset=Branch.objects.all())
     shopId = serializers.SerializerMethodField()
@@ -256,7 +266,8 @@ class StockTransferSerializer(serializers.ModelSerializer):
     shopId = LegacyPrimaryKeyRelatedField(source='shop', queryset=Shop.objects.all(), required=False)
     fromBranchId = LegacyPrimaryKeyRelatedField(source='from_branch', queryset=Branch.objects.all(), required=False)
     toBranchId = LegacyPrimaryKeyRelatedField(source='to_branch', queryset=Branch.objects.all(), required=False)
-    productId = LegacyPrimaryKeyRelatedField(source='product', queryset=Product.objects.all(), required=False)
+    productId = LegacyPrimaryKeyRelatedField(
+        source='product', queryset=Product.objects.filter(is_active=True), required=False)
     createdBy = serializers.PrimaryKeyRelatedField(
         source='created_by', queryset=User.objects.all(), required=False, allow_null=True
     )
@@ -291,3 +302,148 @@ class StockTransferSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return obj.created_by.get_full_name() or obj.created_by.username
         return None
+
+
+class MasterProductSerializer(serializers.ModelSerializer):
+    """One shared-catalogue row, as the tap-to-add picker renders it.
+
+    Read-only by design in Phase 1: the catalogue is curated through the Django
+    admin and the seeder, never through the merchant API, so no tenant write can
+    reach another tenant's picker. ``alreadyAdded`` comes from the selector's
+    annotation and reads false when no ``shopId`` was sent.
+    """
+
+    categoryName = serializers.CharField(source='category_name', read_only=True)
+    imageUrl = serializers.CharField(source='image_url', read_only=True)
+    requiresImei = serializers.BooleanField(source='requires_imei', read_only=True)
+    defaultWarranty = serializers.CharField(source='default_warranty', read_only=True)
+    isVerified = serializers.BooleanField(source='is_verified', read_only=True)
+    isActive = serializers.BooleanField(source='is_active', read_only=True)
+    alreadyAdded = serializers.BooleanField(source='already_added', read_only=True)
+    createdAt = serializers.DateTimeField(source='created_at', read_only=True)
+    updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
+
+    class Meta:
+        model = MasterProduct
+        fields = '__all__'
+        # Nothing on this table is client-writable in Phase 1.
+        read_only_fields = (
+            'id', 'created_at', 'updated_at', 'name', 'brand', 'category_name',
+            'niche', 'barcode', 'image_url', 'default_warranty', 'requires_imei',
+            'attributes', 'is_verified', 'is_active',
+        )
+
+
+class TapToAddItemSerializer(serializers.Serializer):
+    """One catalogue line in a tap-to-add batch: what to add, at what price.
+
+    Prices are optional and only the keys actually sent are written, so a tap
+    can restock without silently zeroing a margin the merchant set by hand.
+    ``quantity`` may be omitted entirely when ``imeiNumbers`` are scanned — the
+    service then counts the devices.
+    """
+
+    masterProductId = LegacyPrimaryKeyRelatedField(
+        source='master_product', queryset=MasterProduct.objects.all()
+    )
+    buyingPrice = serializers.DecimalField(
+        source='buying_price', max_digits=12, decimal_places=2, required=False, allow_null=True
+    )
+    sellingPrice = serializers.DecimalField(
+        source='selling_price', max_digits=12, decimal_places=2, required=False, allow_null=True
+    )
+    wholesalePrice = serializers.DecimalField(
+        source='wholesale_price', max_digits=12, decimal_places=2, required=False, allow_null=True
+    )
+    quantity = serializers.IntegerField(required=False, min_value=0)
+    publishToDirectory = serializers.BooleanField(
+        source='publish_to_directory', required=False, allow_null=True
+    )
+    imeiNumbers = serializers.ListField(
+        source='imei_numbers', child=serializers.CharField(max_length=100),
+        required=False, allow_empty=True,
+    )
+
+
+class TapToAddSerializer(serializers.Serializer):
+    """``POST /api/v1/products/tap-to-add/`` payload.
+
+    Matching, category resolution, the stock ledger and the IMEI checks all live
+    in ``apps.products.services.bulk_tap_to_add_products``.
+    """
+
+    shopId = LegacyPrimaryKeyRelatedField(source='shop', queryset=Shop.objects.all())
+    branchId = LegacyPrimaryKeyRelatedField(
+        source='branch', queryset=Branch.objects.all(), required=False, allow_null=True
+    )
+    items = serializers.ListField(
+        child=TapToAddItemSerializer(), allow_empty=False, min_length=1, max_length=200
+    )
+
+
+class SerialItemSerializer(serializers.ModelSerializer):
+    """One tracked device unit, in the shape the phone screen reads."""
+
+    shopId = LegacyPrimaryKeyRelatedField(source='shop', read_only=True)
+    productId = LegacyPrimaryKeyRelatedField(source='product', read_only=True)
+    branchId = LegacyPrimaryKeyRelatedField(source='branch', read_only=True)
+    imeiNumber = serializers.CharField(source='imei_number', read_only=True)
+    serialNumber = serializers.CharField(source='serial_number', read_only=True)
+    saleItemId = serializers.CharField(source='sale_item_id', read_only=True)
+    createdAt = serializers.DateTimeField(source='created_at', read_only=True)
+    updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
+
+    class Meta:
+        model = InventorySerialItem
+        fields = '__all__'
+        # ``imeiNumber``/``serialNumber``/``branchId`` shadow model fields, which
+        # would otherwise feed DRF's unique-together validator; the (shop, imei)
+        # rule is enforced by the DB constraint and the service.
+        validators = []
+
+
+class SerialNumberInputSerializer(serializers.Serializer):
+    """One scanned unit: an IMEI, a serial number, or both."""
+
+    imeiNumber = serializers.CharField(source='imei_number', required=False, allow_blank=True, max_length=100)
+    serialNumber = serializers.CharField(source='serial_number', required=False, allow_blank=True, max_length=100)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if not (attrs.get('imei_number') or '').strip() and not (attrs.get('serial_number') or '').strip():
+            raise serializers.ValidationError(
+                {'imeiNumber': 'Provide an IMEI number or a serial number.'})
+        return attrs
+
+
+class SerialBulkAddSerializer(serializers.Serializer):
+    """``POST /api/v1/products/{id}/serials/`` payload.
+
+    Accepts the scanner-friendly flat list (``imeiNumbers``) and the richer
+    object list (``items``); either way the service receives ``items``.
+    """
+
+    items = serializers.ListField(
+        child=SerialNumberInputSerializer(), required=False, allow_empty=False, max_length=500
+    )
+    imeiNumbers = serializers.ListField(
+        source='imei_numbers', child=serializers.CharField(max_length=100),
+        required=False, allow_empty=False, max_length=500
+    )
+    branchId = LegacyPrimaryKeyRelatedField(
+        source='branch', queryset=Branch.objects.all(), required=False, allow_null=True
+    )
+    addToStock = serializers.BooleanField(
+        source='add_to_stock', required=False, default=True,
+        help_text='Raise Inventory by the number of units registered.',
+    )
+
+    def validate(self, attrs):
+        items, numbers = attrs.get('items'), attrs.get('imei_numbers')
+        if not items and not numbers:
+            raise serializers.ValidationError(
+                {'items': 'Provide "items" or a list of "imeiNumbers".'})
+        if not items:
+            attrs['items'] = [{'imei_number': str(n).strip()} for n in numbers if str(n).strip()]
+        attrs.pop('imei_numbers', None)
+        return attrs

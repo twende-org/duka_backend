@@ -2,8 +2,36 @@ from django.contrib import admin
 
 from apps.products.models import (
     B2BStockTransfer, B2BStockTransferItem, Category, Inventory, InventoryMovement,
-    Product, StockTransfer,
+    Product, StockTransfer, MasterProduct, InventorySerialItem,
 )
+
+
+@admin.register(MasterProduct)
+class MasterProductAdmin(admin.ModelAdmin):
+    """Platform catalogue curation — the only merchant-neutral data in the app.
+
+    Phase 1 has no merchant-facing write path for these rows, so this is where
+    the catalogue gets built and corrected; ``is_active`` is the kill switch the
+    picker respects.
+    """
+
+    list_display = ('name', 'brand', 'category_name', 'niche', 'barcode', 'requires_imei',
+                    'is_verified', 'is_active', 'created_at')
+    list_filter = ('niche', 'category_name', 'requires_imei', 'is_verified', 'is_active')
+    search_fields = ('name', 'brand', 'barcode', 'category_name')
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('name',)
+
+
+@admin.register(InventorySerialItem)
+class InventorySerialItemAdmin(admin.ModelAdmin):
+    list_display = ('imei_number', 'serial_number', 'product', 'shop', 'branch', 'status',
+                    'sale_item', 'created_at')
+    list_filter = ('status', 'shop', 'branch')
+    search_fields = ('imei_number', 'serial_number', 'product__name', 'shop__name')
+    # sale_item is searched by uuid, so it stays a raw id rather than a picker.
+    raw_id_fields = ('shop', 'product', 'branch', 'sale_item')
+    readonly_fields = ('created_at', 'updated_at')
 
 
 @admin.register(Category)

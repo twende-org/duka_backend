@@ -62,7 +62,7 @@ class ShopSerializer(serializers.ModelSerializer):
         return app_id(owner_role.user) if owner_role else None
 
     def get_productCount(self, obj):
-        return obj.products.count()
+        return obj.products.filter(is_active=True).count()
 
     def get_salesTotal(self, obj):
         total = getattr(obj, 'sales_total', None)

@@ -12,11 +12,11 @@ from apps.crm.services import resolve_sale_customer_user
 # pyrefly: ignore [missing-import]
 from apps.shops.models import Shop, Branch
 # pyrefly: ignore [missing-import]
-from apps.products.models import Product
+from apps.products.models import Product, InventorySerialItem
 # pyrefly: ignore [missing-import]
 from apps.sales.models import Sale, SaleItem, DailySalesSummary, Shift
 # pyrefly: ignore [missing-import]
-from apps.products.services import adjust_inventory
+from apps.products.services import adjust_inventory, clean_imeis
 
 # The UI writes "Taslimu" while API callers use "cash"; Firebase only matched
 # the literal "cash" in some paths, so both spellings must count as cash here.
@@ -175,6 +175,140 @@ def close_shift(
     return locked_shift
 
 
+# ---------------------------------------------------------------------------
+# IMEI / serial units at checkout
+# ---------------------------------------------------------------------------
+
+#: Escape hatch for a phone shop that sells a device whose box was never scanned
+#: in. Read off ``store_policies`` — the free-form dict Firestore already carried
+#: and the app already edits — so a shop can opt out without a new column.
+#: Strict enforcement is the default; this only ever relaxes the *requirement*,
+#: never the checks on IMEIs a cashier does scan.
+IMEI_BYPASS_KEYS = ('allowSaleWithoutImei', 'allow_sale_without_imei')
+
+
+def imei_bypass_enabled(shop) -> bool:
+    policies = getattr(shop, 'store_policies', None) or {}
+    return any(bool(policies.get(key)) for key in IMEI_BYPASS_KEYS)
+
+
+def _unit_label(unit) -> str:
+    """What the receipt prints for one unit: its IMEI, else its serial."""
+    return unit.imei_number or unit.serial_number or str(unit.pk)
+
+
+def _lock_sale_units(*, shop, branch, product, quantity, identifiers, unit_ids):
+    """Return the units a cart line sells, locked, or raise naming what is wrong.
+
+    Every device must be this shop's, this product's, sitting on this branch's
+    shelf and still ``in_stock`` — and there must be exactly as many as the line
+    sells, so ``Inventory`` and the unit register cannot drift apart.
+
+    ``select_for_update`` is what makes a phone sellable once: two registers that
+    scan the same IMEI serialise here instead of both reading ``in_stock``. Rows
+    are locked in primary-key order so two carts holding the same devices in a
+    different order cannot deadlock.
+    """
+    name = product.name
+    refs = clean_imeis(identifiers)
+
+    ids = []
+    for value in unit_ids or []:
+        text = str(value or '').strip()
+        if not text:
+            continue
+        if not is_uuid(text):
+            raise ValidationError(f"{name}: '{text}' is not a valid serial item id.")
+        if text not in ids:
+            ids.append(text)
+
+    if not refs and not ids:
+        return []
+
+    wanted = Q()
+    if refs:
+        wanted |= Q(imei_number__in=refs) | Q(serial_number__in=refs)
+    if ids:
+        wanted |= Q(id__in=ids)
+
+    units = list(
+        InventorySerialItem.objects.select_for_update()
+        .filter(shop=shop, product=product).filter(wanted)
+        .order_by('id')
+    )
+
+    known = {str(u.pk) for u in units}
+    known |= {u.imei_number for u in units if u.imei_number}
+    known |= {u.serial_number for u in units if u.serial_number}
+    unknown = [ref for ref in refs + ids if ref not in known]
+    if unknown:
+        raise ValidationError(
+            f"{name}: not on this shop's shelf for this product: {', '.join(unknown)}."
+        )
+
+    off_shelf = [
+        f'{_unit_label(u)} ({u.get_status_display()})'
+        for u in units if u.status != 'in_stock'
+    ]
+    if off_shelf:
+        raise ValidationError(
+            f"{name}: already sold or otherwise off the shelf: {', '.join(off_shelf)}."
+        )
+
+    elsewhere = [_unit_label(u) for u in units if u.branch_id and u.branch_id != branch.id]
+    if elsewhere:
+        raise ValidationError(
+            f"{name}: stocked in another branch: {', '.join(elsewhere)}."
+        )
+
+    if len(units) != quantity:
+        raise ValidationError(
+            f"{name}: {quantity} unit(s) sold but {len(units)} device(s) identified. "
+            f'One scanned device is one unit of stock.'
+        )
+    return units
+
+
+def _plan_line_serials(shop, branch, line):
+    """Units one priced cart line sells, enforcing that product's IMEI rule.
+
+    A product flagged ``requires_imei`` cannot be sold blind: the scan is the
+    only thing tying the receipt to the device that left the counter. A shop can
+    relax that with ``allowSaleWithoutImei``; naming even one device can't.
+    """
+    product = line['product']
+    units = _lock_sale_units(
+        shop=shop,
+        branch=branch,
+        product=product,
+        quantity=line['quantity'],
+        identifiers=line.get('imei_numbers') or [],
+        unit_ids=line.get('serial_item_ids') or [],
+    )
+    if not units and product.requires_imei and not imei_bypass_enabled(shop):
+        raise ValidationError(
+            f"{product.name} tracks every unit by IMEI. Scan {line['quantity']} "
+            f"IMEI number(s), or allow IMEI-free sales in this shop's store policies."
+        )
+    return units
+
+
+def _assign_units(sale_item, units, branch):
+    """Mark units sold against ``sale_item`` — the step a draft must not do."""
+    if not units:
+        return
+    now = timezone.now()
+    for unit in units:
+        unit.status = 'sold'
+        unit.sale_item = sale_item
+        # A unit registered without a branch leaves the shelf this sale draws from.
+        unit.branch_id = unit.branch_id or branch.id
+        unit.updated_at = now
+    InventorySerialItem.objects.bulk_update(
+        units, ['status', 'sale_item', 'branch', 'updated_at']
+    )
+
+
 def _price_items(items_data: list):
     """
     Prices each cart line, honouring the discounted line total the POS sends.
@@ -216,6 +350,11 @@ def _price_items(items_data: list):
             'unit_price': unit_price,
             'total_price': subtotal,
             'profit': item_profit,
+            # A line may name the exact devices it sells, by scanned code or by
+            # the serial row's own id; ``_plan_line_serials`` turns them into
+            # locked rows and this list into the receipt snapshot.
+            'imei_numbers': list(item_data.get('imei_numbers') or []),
+            'serial_item_ids': list(item_data.get('serial_item_ids') or []),
         })
 
     return processed_items, total_amount, total_profit, total_discount
@@ -237,12 +376,14 @@ def process_pos_sale(
     """
     Atomically processes a Point of Sale transaction.
     - Validates and deducts stock for all items
+    - Claims and marks sold any IMEI/serial units the lines name
     - Calculates total price and profit (per-line discounted totals win)
     - Creates Sale and SaleItem records
     - Increments the DailySalesSummary for the branch
     - Links the sale to an open shift and adds cash payments to its drawer total
 
-    items_data format: [{'product': ProductInstance, 'quantity': 10, 'unit_price': 500}, ...]
+    items_data format: [{'product': ProductInstance, 'quantity': 10, 'unit_price': 500,
+    'imei_numbers': [...], 'serial_item_ids': [...]}, ...] — the two unit keys are optional.
     """
     if not items_data:
         raise ValidationError("Sale must contain at least one item.")
@@ -257,6 +398,13 @@ def process_pos_sale(
             raise ValidationError("Shift is not open.")
 
     processed_items, total_sale_amount, total_sale_profit, total_discount = _price_items(items_data)
+
+    # Devices are claimed before anything moves. Locking the unit rows here means
+    # a second register scanning the same IMEI waits and then fails with a clear
+    # error, rather than selling one phone twice.
+    serial_plan = [
+        (p_item, _plan_line_serials(shop, branch, p_item)) for p_item in processed_items
+    ]
 
     for p_item in processed_items:
         # adjust_inventory locks the row and raises ValidationError on insufficient stock.
@@ -294,7 +442,7 @@ def process_pos_sale(
     
     # Create Sale Items
     sale_item_objs = []
-    for p_item in processed_items:
+    for p_item, units in serial_plan:
         sale_item_objs.append(
             SaleItem(
                 sale=sale,
@@ -303,11 +451,19 @@ def process_pos_sale(
                 quantity=p_item['quantity'],
                 unit_price=p_item['unit_price'],
                 total_price=p_item['total_price'],
-                profit=p_item['profit']
+                profit=p_item['profit'],
+                # The codes as the rows carry them, so the receipt survives a
+                # later void (which releases the units but rewrites no snapshot).
+                imei_numbers=[_unit_label(unit) for unit in units],
             )
         )
     SaleItem.objects.bulk_create(sale_item_objs)
-    
+
+    # ``bulk_create`` stamps the uuids on both engines, so the units can be
+    # pointed back at the lines that sold them.
+    for (_p_item, units), sale_item in zip(serial_plan, sale_item_objs):
+        _assign_units(sale_item, units, branch)
+
     # Update Daily Summary Atomically
     today = timezone.localtime(timezone.now()).date()
     apply_daily_summary_delta(
@@ -373,6 +529,14 @@ def create_draft_sale(
         status='draft'
     )
 
+    # A draft names its devices but does not claim them: the units stay on the
+    # shelf until ``confirm_draft_sale``, so a cart left open overnight never
+    # holds stock hostage. Validating here anyway is what tells the cashier the
+    # scan is wrong now instead of at checkout.
+    serial_plan = [
+        (p_item, _plan_line_serials(shop, branch, p_item)) for p_item in processed_items
+    ]
+
     SaleItem.objects.bulk_create([
         SaleItem(
             sale=sale,
@@ -381,9 +545,10 @@ def create_draft_sale(
             quantity=p_item['quantity'],
             unit_price=p_item['unit_price'],
             total_price=p_item['total_price'],
-            profit=p_item['profit']
+            profit=p_item['profit'],
+            imei_numbers=[_unit_label(unit) for unit in units],
         )
-        for p_item in processed_items
+        for p_item, units in serial_plan
     ])
 
     return sale
@@ -407,6 +572,14 @@ def confirm_draft_sale(sale: Sale, attendant=None):
     for item in items:
         if item.product is None:
             raise ValidationError(f"Bidhaa '{item.product_name}' haipo tena.")
+        # A draft records the codes but claims nothing, so checkout is where the
+        # units are locked. A device sold over the counter since the draft was
+        # saved fails here, with its IMEI named, rather than selling twice.
+        units = _plan_line_serials(locked_sale.shop, locked_sale.branch, {
+            'product': item.product,
+            'quantity': item.quantity,
+            'imei_numbers': item.imei_numbers or [],
+        })
         adjust_inventory(
             product=item.product,
             branch=locked_sale.branch,
@@ -415,6 +588,7 @@ def confirm_draft_sale(sale: Sale, attendant=None):
             user=attendant,
             reason=f"Confirmation of Draft #{locked_sale.id}"
         )
+        _assign_units(item, units, locked_sale.branch)
 
     apply_daily_summary_delta(
         shop=locked_sale.shop,
@@ -487,7 +661,9 @@ def create_b2b_order(
         # Product ids travel in the same two spellings as customer ids.
         value = str(product_id or '')
         lookup = Q(id=value) if is_uuid(value) else Q(legacy_id=value)
-        product = Product.objects.filter(lookup, shop=shop).first()
+        # ``is_active``: a product the merchant deleted must not be orderable
+        # again through the B2B portal, same rule the POS checkout applies.
+        product = Product.objects.filter(lookup, shop=shop, is_active=True).first()
         if product is None:
             raise ValidationError(f"Product {product_id} does not exist.")
             
@@ -634,7 +810,10 @@ def create_storefront_order(
         quantity = int(item.get('quantity') or 1)
         value = str(item.get('product_id') or '')
         lookup = Q(id=value) if is_uuid(value) else Q(legacy_id=value)
-        product = Product.objects.filter(lookup, shop=shop).first()
+        # ``is_active`` keeps a deleted product on the vanished-doc branch below,
+        # exactly as a hard Firestore delete did: the line records the client's
+        # last-seen price instead of silently re-pricing at the row's current one.
+        product = Product.objects.filter(lookup, shop=shop, is_active=True).first()
 
         if product is not None:
             unit_price = storefront_unit_price(product, quantity)
@@ -837,3 +1016,123 @@ def pay_order(order, payment_method: str = 'Cash', shift=None):
             customer.save(update_fields=['total_spent', 'total_purchases'])
 
     return order
+
+
+# ---------------------------------------------------------------------------
+# Returns / voided sales
+# ---------------------------------------------------------------------------
+
+def release_sale_units(items):
+    """Put every unit sold on these sale lines back on the shelf.
+
+    ``sale_item`` is cleared so the register reads as if the device never left;
+    the receipt keeps its own ``imei_numbers`` snapshot, because that is history
+    rather than stock state.
+
+    :param items: iterable of :class:`SaleItem` rows being returned
+    :returns: the unit rows that came back
+    """
+    units = list(
+        InventorySerialItem.objects.select_for_update().filter(
+            sale_item__in=items, status='sold'
+        ).order_by('id')
+    )
+    if not units:
+        return []
+
+    # The device may have been re-registered as a fresh unit while it was away
+    # (a trade-in back through the counter). Two in-stock rows with one IMEI is
+    # exactly what the shop's unique constraint forbids, so say so instead of
+    # letting the write raise.
+    imeis = [u.imei_number for u in units if u.imei_number]
+    clashes = sorted(set(
+        InventorySerialItem.objects.filter(
+            status='in_stock', imei_number__in=imeis
+        ).values_list('imei_number', flat=True)
+    ))
+    if clashes:
+        raise ValidationError(
+            'Already re-registered as new units, so they cannot go back on the shelf: '
+            f'{", ".join(clashes)}.'
+        )
+
+    now = timezone.now()
+    for unit in units:
+        unit.status = 'in_stock'
+        unit.sale_item = None
+        unit.updated_at = now
+    InventorySerialItem.objects.bulk_update(
+        units, ['status', 'sale_item', 'updated_at']
+    )
+    return units
+
+
+@transaction.atomic
+def void_sale(sale, user=None, reason: str = ''):
+    """Reverse a completed POS sale: stock back, IMEIs released, books corrected.
+
+    Until now the app had no return path at all, so a phone handed back across
+    the counter kept its ``sold`` IMEI forever and the day's totals stayed
+    inflated. Voiding moves the mirror image of the sale through the same
+    helpers that recorded it — the ledger row per restocked product, the daily
+    summary delta, the drawer credit — so nothing is hand-corrected afterwards.
+
+    A draft is not voided: it never moved stock or money, so it is deleted.
+
+    :param sale: completed :class:`Sale` to reverse
+    :param user: staff member taking the return (stamped on the ledger)
+    :param reason: free text carried into the movement reasons
+    :returns: the now-``voided`` sale
+    """
+    locked = Sale.objects.select_for_update().get(id=sale.id)
+    if locked.status == 'draft':
+        raise ValidationError('A draft sale has moved nothing to reverse; delete it instead.')
+    if locked.status == 'voided':
+        raise ValidationError('This sale is already voided.')
+
+    items = list(locked.items.select_related('product'))
+    if not items:
+        raise ValidationError('This sale has no items to return.')
+
+    # Products are PROTECTed while they still carry units, so a row referenced by
+    # a sale exists unless it predates that rule; say which line cannot be
+    # restocked rather than failing on a null product.
+    missing = [item.product_name or str(item.pk) for item in items if item.product is None]
+    if missing:
+        raise ValidationError(
+            f"Stock cannot go back for products that no longer exist: {', '.join(missing)}."
+        )
+
+    release_sale_units(items)
+
+    note = f"Void of Sale #{locked.id}"
+    if reason:
+        note = f'{note}: {reason}'[:255]
+    for item in items:
+        adjust_inventory(
+            product=item.product,
+            branch=locked.branch,
+            movement_type='adjustment',
+            quantity_change=item.quantity,
+            user=user,
+            reason=note,
+        )
+
+    apply_daily_summary_delta(
+        shop=locked.shop,
+        branch=locked.branch,
+        date=timezone.localtime(locked.created_at).date(),
+        total_sales=-locked.total_amount,
+        transactions=-1,
+        profit=-(locked.profit or Decimal('0.00')),
+    )
+
+    if locked.shift_id and is_cash_payment(locked.payment_method):
+        drawer = Shift.objects.select_for_update().filter(id=locked.shift_id).first()
+        if drawer is not None:
+            drawer.cash_sales_total -= locked.total_amount
+            drawer.save(update_fields=['cash_sales_total', 'updated_at'])
+
+    locked.status = 'voided'
+    locked.save(update_fields=['status', 'updated_at'])
+    return locked

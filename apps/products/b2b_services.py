@@ -282,13 +282,18 @@ def _default_branch(shop):
 
 
 def suggest_product_for_item(shop, item):
-    """Read-only prefill for the buyer's mapping UI: barcode, then SKU, then name."""
+    """Read-only prefill for the buyer's mapping UI: barcode, then SKU, then name.
+
+    Matches skip soft-deleted rows so a suggestion can never map a supplier line
+    onto a product the receiving shop no longer carries.
+    """
     if item.barcode:
-        product = Product.objects.filter(shop=shop, barcode=item.barcode).first()
+        product = Product.objects.filter(shop=shop, barcode=item.barcode, is_active=True).first()
         if product is not None:
             return product
     if item.sku:
-        product = Product.objects.filter(shop=shop, sku=item.sku).first()
+        product = Product.objects.filter(shop=shop, sku=item.sku, is_active=True).first()
         if product is not None:
             return product
-    return Product.objects.filter(shop=shop, name__iexact=item.product_name).first()
+    return Product.objects.filter(
+        shop=shop, name__iexact=item.product_name, is_active=True).first()

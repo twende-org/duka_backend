@@ -9,7 +9,8 @@ from apps.shops.models import Shop, UserRole
 class B2BStockTransferItemSerializer(serializers.ModelSerializer):
     # productName/sku/unit are snapshotted from the product by the service,
     # so they stay optional on input and read-only-ish on output.
-    productId = LegacyPrimaryKeyRelatedField(source='product', queryset=Product.objects.all())
+    productId = LegacyPrimaryKeyRelatedField(
+        source='product', queryset=Product.objects.filter(is_active=True))
     productName = serializers.CharField(source='product_name', required=False, max_length=255)
     unitCost = serializers.DecimalField(source='unit_cost', max_digits=12, decimal_places=2, required=False)
     sku = serializers.CharField(required=False, allow_blank=True, max_length=100)
@@ -76,7 +77,7 @@ class B2BTransferMapItemSerializer(serializers.Serializer):
     itemId = LegacyPrimaryKeyRelatedField(
         source='item', queryset=B2BStockTransferItem.objects.all())
     productId = LegacyPrimaryKeyRelatedField(
-        source='product', queryset=Product.objects.all(), allow_null=True)
+        source='product', queryset=Product.objects.filter(is_active=True), allow_null=True)
 
 
 class B2BTransferMapSerializer(serializers.Serializer):

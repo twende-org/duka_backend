@@ -49,6 +49,41 @@ class MerchantCategory(CoreModel):
     def __str__(self):
         return f"{self.name} ({self.shop.name})"
 
+class MasterProduct(CoreModel):
+    """Platform-wide catalogue row shared by every shop (Phase 1 tap-to-add).
+
+    Carries identity only — name, brand, barcode, warranty — never price or
+    stock: each shop keeps its own cost and margin on its own ``Product``.
+    No ``legacy_id``: these rows have no Firestore history, so ``app_id()``
+    falls back to the uuid and the legacy helpers still work on them.
+    """
+
+    name = models.CharField(max_length=255, db_index=True)
+    brand = models.CharField(max_length=100, blank=True, db_index=True)
+    # Free text, not a FK: the shop-side ``Category`` rows are per-shop, so a
+    # global taxonomy FK would either force a new shared table or break that
+    # isolation. The tap-to-add service resolves this name into the shop's own
+    # category, the same way the AI intake apply step does.
+    category_name = models.CharField(max_length=100, db_index=True)
+    niche = models.CharField(max_length=50, default='electronics', db_index=True)
+    barcode = models.CharField(max_length=100, blank=True, db_index=True)
+    # TextField, matching Product.image_url: the Firestore-era rows this mirrors
+    # held base64 data URLs, which URLField would reject on write.
+    image_url = models.TextField(blank=True, null=True)
+    default_warranty = models.CharField(max_length=100, blank=True)
+    requires_imei = models.BooleanField(default=False)
+    attributes = models.JSONField(default=dict, blank=True, null=True)
+    is_verified = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name_plural = 'master products'
+
+    def __str__(self):
+        return f"{self.brand} {self.name}".strip()
+
+
 class Product(CoreModel):
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='products')
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, blank=True)
@@ -109,6 +144,15 @@ class Product(CoreModel):
     variants = models.JSONField(default=list, blank=True, null=True)
     tags = models.JSONField(default=list, blank=True, null=True)
     
+    # Shared Master Catalog (Phase 1). Nullable, so every pre-catalog product is
+    # untouched; only the tap-to-add service writes it, and the API serializer
+    # keeps it read-only so a generic product PATCH cannot repoint a shop row.
+    master_product = models.ForeignKey(
+        MasterProduct, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='shop_products',
+    )
+    requires_imei = models.BooleanField(default=False)
+
     # B2B & Sourcing
     supplier = models.CharField(max_length=255, blank=True, null=True)
     source_product_id = models.CharField(max_length=255, blank=True, null=True)
@@ -146,6 +190,64 @@ class InventoryMovement(CoreModel):
     new_qty = models.IntegerField(default=0)
     reason = models.CharField(max_length=255, blank=True)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+
+class InventorySerialItem(CoreModel):
+    """One physical unit, tracked by IMEI or serial number, inside one shop.
+
+    Shop-scoped rather than catalogue-scoped: the same ``MasterProduct`` has
+    different devices in different shops, and stock itself is already keyed by
+    (product, branch) in :class:`Inventory`. The POS checkout links a unit to its
+    sale line (``sale_item``) when the cashier scans it; a voided sale puts the
+    unit back on the shelf.
+    """
+
+    STATUS_CHOICES = (
+        ('in_stock', 'In Stock'),
+        ('sold', 'Sold'),
+        ('reserved', 'Reserved'),
+        ('returned', 'Returned'),
+        ('damaged', 'Damaged'),
+    )
+
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='serial_items')
+    # PROTECT, not CASCADE: a sold unit is the warranty and theft record for a
+    # device that left the shop months ago. Deleting the product row must not
+    # take that history with it — the API soft-deletes products instead (see
+    # ``ProductViewSet.perform_destroy``), and this constraint is what makes a
+    # hard delete fail loudly rather than silently erase the audit trail.
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name='serial_items')
+    branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='serial_items'
+    )
+    imei_number = models.CharField(max_length=100, db_index=True)
+    serial_number = models.CharField(max_length=100, blank=True, db_index=True)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='in_stock', db_index=True
+    )
+    #: Set only once a future checkout links the unit to a sale line; the
+    #: product itself stays named because SaleItem already snapshots its name.
+    sale_item = models.ForeignKey(
+        'sales.SaleItem', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='serial_items',
+    )
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            # A device that is on the shelf cannot be registered twice. Blank
+            # IMEIs (serial-only items) are excluded or every one of them would
+            # collide with the next.
+            models.UniqueConstraint(
+                fields=['shop', 'imei_number'],
+                condition=Q(status='in_stock') & ~Q(imei_number=''),
+                name='uniq_serial_imei_in_stock_per_shop',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.imei_number or self.serial_number} ({self.get_status_display()})"
+
 
 class StockTransfer(CoreModel):
     STATUS_CHOICES = (

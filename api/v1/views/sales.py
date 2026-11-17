@@ -11,15 +11,15 @@ from apps.products.models import Product
 from apps.core.legacy import (
     LegacyLookupMixin, filter_by_ref, is_uuid, resolve_legacy_pk,
 )
-from apps.shops.permissions import ShopScopedQuerysetMixin, assert_shop_access
+from apps.shops.permissions import ShopScopedQuerysetMixin, assert_shop_access, MANAGEMENT_ROLES
 from apps.core.utils import drf_validation_error, first_param
 from api.v1.serializers.sales import (
-    SaleSerializer, POSSaleInputSerializer,
+    SaleSerializer, POSSaleInputSerializer, VoidSaleInputSerializer,
     OrderSerializer, CreateB2BOrderInputSerializer,
     UpdateFulfillmentStatusSerializer, PayOrderInputSerializer,
 )
 from apps.sales.services import (
-    process_pos_sale, create_draft_sale, confirm_draft_sale,
+    process_pos_sale, create_draft_sale, confirm_draft_sale, void_sale,
     create_b2b_order, update_fulfillment_status, pay_order,
 )
 from apps.products.b2b_services import stage_sale_delivery
@@ -100,7 +100,7 @@ class SalesViewSet(ShopScopedQuerysetMixin, LegacyLookupMixin, viewsets.ModelVie
         for item in data['items']:
             value = str(item.get('product_id') or '')
             lookup = Q(id=value) if is_uuid(value) else Q(legacy_id=value)
-            product = Product.objects.filter(lookup, shop=shop).first()
+            product = Product.objects.filter(lookup, shop=shop, is_active=True).first()
             if product is None:
                 raise DRFValidationError({'items': f"Product {item['product_id']} not found."})
             hydrated_items.append({
@@ -108,6 +108,10 @@ class SalesViewSet(ShopScopedQuerysetMixin, LegacyLookupMixin, viewsets.ModelVie
                 'quantity': item['quantity'],
                 'unit_price': item['unit_price'],
                 'total_price': item.get('total_price'),
+                # Which exact devices the line sells, if any; every rule about
+                # them (count, shelf state, branch, product) lives in the service.
+                'imei_numbers': item.get('imei_numbers') or [],
+                'serial_item_ids': item.get('serial_item_ids') or [],
             })
 
         shift = None
@@ -166,6 +170,29 @@ class SalesViewSet(ShopScopedQuerysetMixin, LegacyLookupMixin, viewsets.ModelVie
         sale = self.get_object()
         try:
             sale = confirm_draft_sale(sale, attendant=request.user)
+        except ValidationError as e:
+            raise drf_validation_error(e)
+        return Response(SaleSerializer(sale).data)
+
+    @action(detail=True, methods=['post'])
+    def void(self, request, pk=None):
+        """Takes a whole sale back: stock and IMEI units return, the day's books reverse.
+
+        Owner and manager only — a return undoes money another person rang up, so
+        the cashier who made the sale cannot quietly erase it.
+        """
+        sale = self.get_object()
+        assert_shop_access(request.user, sale.shop_id, roles=MANAGEMENT_ROLES)
+
+        input_serializer = VoidSaleInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+
+        try:
+            sale = void_sale(
+                sale,
+                user=request.user,
+                reason=input_serializer.validated_data.get('reason') or '',
+            )
         except ValidationError as e:
             raise drf_validation_error(e)
         return Response(SaleSerializer(sale).data)

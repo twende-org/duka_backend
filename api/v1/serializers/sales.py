@@ -23,10 +23,18 @@ class SaleItemSerializer(serializers.ModelSerializer):
     price = serializers.DecimalField(source='unit_price', max_digits=12, decimal_places=2, read_only=True)
     subtotal = serializers.DecimalField(source='total_price', max_digits=12, decimal_places=2, read_only=True)
     totalPrice = serializers.DecimalField(source='total_price', max_digits=12, decimal_places=2, read_only=True)
+    #: The exact devices this line sold. Read off the line's own snapshot rather
+    #: than the live ``InventorySerialItem`` rows, so voiding a sale — which puts
+    #: the units back on the shelf — never rewrites a receipt already printed.
+    #: Always a list: a line that sold untracked stock reads back ``[]``.
+    imeiNumbers = serializers.SerializerMethodField()
 
     class Meta:
         model = SaleItem
         fields = '__all__'
+
+    def get_imeiNumbers(self, obj) -> list[str]:
+        return obj.imei_numbers or []
 
 
 class SaleSerializer(serializers.ModelSerializer):
@@ -81,6 +89,28 @@ class POSSaleItemInputSerializer(serializers.Serializer):
     #: The cart's discounted line total (``lineTotal``); missing means no discount.
     subtotal = serializers.DecimalField(source='total_price', max_digits=12, decimal_places=2, required=False)
     totalPrice = serializers.DecimalField(source='total_price', max_digits=12, decimal_places=2, required=False)
+    #: The devices this line sells, either as the IMEI/serial numbers scanned off
+    #: the boxes or as the ids of units already registered in this shop. Optional;
+    #: ``process_pos_sale`` requires one per unit when the product tracks them, and
+    #: rejects a code that is sold, belongs to another product or another branch.
+    #: Blanks are accepted here and dropped by the service: a scanner that fires
+    #: twice on an empty box must not fail a sale the cashier already paid for.
+    imei_numbers = serializers.ListField(
+        child=serializers.CharField(max_length=100, allow_blank=True),
+        required=False, allow_null=True
+    )
+    imeiNumbers = serializers.ListField(
+        source='imei_numbers', child=serializers.CharField(max_length=100, allow_blank=True),
+        required=False, allow_null=True
+    )
+    serial_item_ids = serializers.ListField(
+        child=serializers.CharField(max_length=64, allow_blank=True),
+        required=False, allow_null=True
+    )
+    serialItemIds = serializers.ListField(
+        source='serial_item_ids', child=serializers.CharField(max_length=64, allow_blank=True),
+        required=False, allow_null=True
+    )
 
     def validate(self, attrs):
         errors = {}
@@ -124,7 +154,9 @@ class POSSaleInputSerializer(serializers.Serializer):
 
     #: ``addDraftSale`` posted the whole cart with ``status: "draft"``; the same
     #: endpoint serves both, and the view routes drafts to the draft service.
-    status = serializers.ChoiceField(choices=[c[0] for c in Sale.SALE_STATUS], required=False, default='completed')
+    #: ``voided`` is deliberately absent: only ``void_sale`` reaches that state,
+    #: so a create call must not be able to post a sale already reversed.
+    status = serializers.ChoiceField(choices=['completed', 'draft'], required=False, default='completed')
 
     def validate(self, attrs):
         errors = {}
@@ -273,6 +305,14 @@ class UpdateFulfillmentStatusSerializer(serializers.Serializer):
     fulfillment_data = serializers.JSONField(required=False, allow_null=True)
     fulfillmentData = serializers.JSONField(source='fulfillment_data', required=False, allow_null=True)
     items = UpdateFulfillmentItemSerializer(many=True, required=False, allow_empty=True)
+
+class VoidSaleInputSerializer(serializers.Serializer):
+    """Body of ``POST /sales/{id}/void/`` — only the reason is sent, if anything."""
+
+    reason = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True, max_length=200
+    )
+
 
 class PayOrderInputSerializer(serializers.Serializer):
     """Settles a pending order; Firestore's ``payOrder`` only ever sent these two."""

@@ -28,8 +28,9 @@ celerybeat-schedule*
 celerybeat.pid
 
 # Test and coverage output
-# The test suite stays in the app monorepo; this deploy repo ships without it.
-tests/
+# The root tests/ package belongs to the app monorepo. Anchored, so the
+# app-level suites under apps/*/tests/ are tracked and CI actually runs them.
+/tests/
 .coverage
 .coverage.*
 htmlcov/

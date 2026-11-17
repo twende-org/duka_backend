@@ -99,6 +99,7 @@ MASTER_PRODUCT_SEARCH_FIELDS = (
 
 
 def search_master_products(*, query: str = '', niche: str = None,
+                           niches: list = None,
                            category_name: str = None, brand: str = None,
                            shop: Shop = None):
     """Catalogue browse/search behind the tap-to-add picker.
@@ -111,6 +112,11 @@ def search_master_products(*, query: str = '', niche: str = None,
     With ``shop`` set, each row is annotated ``already_added`` so the picker can
     show what the merchant already carries instead of offering a second tap.
 
+    ``niches`` scopes the picker to the merchant's catalog lanes. A lane with
+    no seeded rows yet would hand that merchant an empty picker, so when the
+    scoped slice is empty the filter is dropped and the whole catalogue shows —
+    lane filtering therefore starts by itself the day a lane's data lands.
+
     Returns a queryset for a browse (no meaningful ``query``) and a ranked list
     for a search, exactly like :func:`apps.core.search.search_queryset`; callers
     must pass the result straight to the paginator, which accepts both.
@@ -118,6 +124,10 @@ def search_master_products(*, query: str = '', niche: str = None,
     products = MasterProduct.objects.filter(is_active=True)
     if niche:
         products = products.filter(niche=niche)
+    elif niches:
+        scoped = products.filter(niche__in=niches)
+        if scoped.exists():
+            products = scoped
     if category_name:
         products = products.filter(category_name__iexact=category_name)
     if brand:

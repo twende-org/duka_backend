@@ -244,7 +244,7 @@ class ProductViewSet(LegacyLookupMixin, ShopScopedQuerysetMixin, viewsets.ModelV
 class MasterProductSearchView(APIView):
     """Shared-catalogue browse/search behind the tap-to-add picker.
 
-    ``GET /api/v1/master-products/?q=&niche=&category=&brand=&shopId=&page=``
+    ``GET /api/v1/master-products/?q=&niche=&niches=&category=&brand=&shopId=&page=``
     answers DRF page-number pagination of ``MasterProductSerializer`` rows,
     ranked the way the marketplace search ranks products so an exact barcode
     lookup lands first and an empty ``q`` is plain browse order (name).
@@ -272,9 +272,16 @@ class MasterProductSearchView(APIView):
             if shop is not None:
                 assert_shop_access(request.user, shop.id)
 
+        # `niches` scopes the picker to the merchant's lanes; both repeated
+        # params and one comma-separated param are accepted.
+        niches = []
+        for chunk in params.getlist('niches'):
+            niches.extend(part.strip() for part in chunk.split(',') if part.strip())
+
         results = search_master_products(
             query=first_param(params, 'q', 'search') or '',
             niche=(first_param(params, 'niche') or '').strip() or None,
+            niches=niches or None,
             category_name=(first_param(params, 'category', 'category_name', 'categoryName') or '').strip() or None,
             brand=(first_param(params, 'brand') or '').strip() or None,
             shop=shop,

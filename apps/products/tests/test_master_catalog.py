@@ -50,6 +50,31 @@ class MasterProductSelectorTests(TestCase):
             [],
         )
 
+    def test_niches_scope_the_picker_and_fall_back_when_the_lane_is_empty(self):
+        catalog('Rice 5kg', brand='Local', category='Groceries', niche='grocery')
+
+        # A lane with data is honoured.
+        self.assertEqual(
+            {row.name for row in search_master_products(niches=['grocery'])},
+            {'Rice 5kg'},
+        )
+        # Several lanes act as a union.
+        self.assertEqual(
+            {row.name for row in search_master_products(niches=['grocery', 'electronics'])},
+            {'Spark 20', 'Galaxy A15', '18W Wall Charger', 'Rice 5kg'},
+        )
+        # A lane with nothing seeded would hand the merchant an empty picker,
+        # so the filter drops and the whole catalogue shows instead.
+        self.assertEqual(
+            {row.name for row in search_master_products(niches=['kitchen'])},
+            {'Spark 20', 'Galaxy A15', '18W Wall Charger', 'Rice 5kg'},
+        )
+        # No lanes at all means no scoping either.
+        self.assertEqual(
+            {row.name for row in search_master_products(niches=[])},
+            {'Spark 20', 'Galaxy A15', '18W Wall Charger', 'Rice 5kg'},
+        )
+
     def test_query_ranks_an_exact_barcode_and_name_prefix_first(self):
         self.samsung.barcode = '8806092000000'
         self.samsung.save(update_fields=['barcode'])
@@ -274,6 +299,22 @@ class CatalogApiTests(TestCase):
         response = self.client.get(
             '/api/v1/master-products/', {'shopId': str(Shop.objects.create(name='Elsewhere').id)})
         self.assertEqual(response.status_code, 403)
+
+    def test_catalog_niches_param_scopes_and_falls_back(self):
+        catalog('Rice 5kg', brand='Local', category='Groceries', niche='grocery')
+        shop_id = str(self.shop.id)
+
+        # A comma-separated param scopes to the named lanes.
+        response = self.client.get('/api/v1/master-products/',
+                                   {'shopId': shop_id, 'niches': 'grocery'})
+        self.assertEqual([row['name'] for row in response.data['results']], ['Rice 5kg'])
+
+        # Repeated params and commas both work, and a lane with no seeded rows
+        # falls back to the full catalogue instead of an empty picker.
+        response = self.client.get('/api/v1/master-products/',
+                                   {'shopId': shop_id, 'niches': ['kitchen', 'phone']})
+        names = {row['name'] for row in response.data['results']}
+        self.assertEqual(names, {'Spark 20', 'Rice 5kg'})
 
     def test_tap_to_add_returns_created_products(self):
         response = self.client.post('/api/v1/products/tap-to-add/', {

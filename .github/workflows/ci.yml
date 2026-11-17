@@ -91,9 +91,11 @@ jobs:
             docker compose up -d db redis
             docker compose pull api worker beat
 
-            # One-off container: migrate once (not per-replica) and populate the
-            # shared static volume before any api replica starts serving.
-            docker compose run --rm --no-deps api sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
+            # One-off container: migrate once (not per-replica), populate the
+            # shared static volume, and load the shared catalog before any api
+            # replica starts serving. The seeder is get_or_create-keyed, so
+            # every deploy re-runs it harmlessly.
+            docker compose run --rm --no-deps api sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput && python manage.py seed_electronics_catalog --apply"
 
             docker compose up -d
             docker compose ps
